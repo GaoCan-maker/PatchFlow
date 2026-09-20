@@ -1,0 +1,36 @@
+# Python 解释器缓存
+__pycache__/
+*.py[cod]
+
+# 虚拟环境
+.venv/
+venv/
+.conda/
+
+# 测试、覆盖率和静态检查缓存
+.pytest_cache/
+.pytest-tmp/
+.coverage
+htmlcov/
+.ruff_cache/
+.mypy_cache/
+
+# 构建产物
+build/
+dist/
+*.egg-info/
+
+# PatchFlow 运行产物，正式实验结果应按需单独归档
+runs/
+artifacts/
+
+# 编辑器与系统文件
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# 本地密钥与环境变量
+.env
+.env.*
+!.env.example
