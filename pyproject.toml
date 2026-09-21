@@ -45,4 +45,5 @@ line-length = 100
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "RUF"]
-
+# 中文逐行注释会自然使用全角标点并拉长行宽，因此关闭只影响排版、不影响程序正确性的规则。
+ignore = ["E501", "RUF001", "RUF002", "RUF003"]
