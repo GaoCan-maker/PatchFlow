@@ -2,7 +2,7 @@
 
 PatchFlow 是一个验证驱动的仓库级 Code Agent。系统计划接收代码仓库、基础提交和 Issue 描述，在隔离环境中完成问题理解、故障复现、代码定位、候选补丁生成、测试验证和最终补丁输出。
 
-当前仓库已经完成领域骨架、LocalRuntime 工具闭环和 DockerRuntime 最小实现。现阶段不接入真实模型；DockerRuntime 的真实容器集成测试尚待在 WSL Docker 集成启用后运行。
+当前仓库已经完成领域骨架、LocalRuntime 工具闭环，以及 DockerRuntime 的真实容器集成验收。现阶段尚未接入真实模型和 Agent loop。
 
 ## 当前能力
 
@@ -12,6 +12,7 @@ PatchFlow 是一个验证驱动的仓库级 Code Agent。系统计划接收代�
 - 使用 `AgentState` 表示可恢复的 Agent 当前状态。
 - 提供异步 `LocalRuntime`，支持命令执行、超时、stdout/stderr 捕获、确定性截断、补丁、diff 和回滚。
 - 提供 DockerRuntime：只读挂载源仓库，在容器 tmpfs 中复制出独立可写副本；默认禁网、非 root、限制 CPU/内存/PID，命令超时销毁容器。
+- 两种 Runtime 的 `get_diff` 均包含受 Git 跟踪的改动和未忽略的新文件；Docker CLI 输出使用有界缓冲，避免大量输出占满宿主机内存。
 - 使用严格子目录、Git 基础提交、干净工作区、路径策略和符号链接解析约束本地执行范围。
 - 提供 `search_text`、`read_code`、`apply_patch`、`git_diff`、`run_tests` 和 `run_command` 结构化工具。
 - 使用 Pydantic 严格校验工具参数，并将参数错误、权限拒绝、非零退出和超时转换成结构化观察。
@@ -53,7 +54,7 @@ docker build -t patchflow-runtime:py311 .
 PATCHFLOW_RUN_DOCKER_TESTS=1 python -m pytest -q tests/test_docker_integration.py
 ```
 
-镜像构建需要联网下载基础镜像和 Python 依赖；任务运行默认 `--network none`。`.dockerignore` 只允许包代码与必要元数据进入构建上下文。上述集成测试尚未在当前环境实际跑通，不应将其视为已验证结果。
+镜像构建需要联网下载基础镜像和 Python 依赖；任务运行默认 `--network none`。`.dockerignore` 只允许包代码与必要元数据进入构建上下文。WSL2 + Docker Desktop 环境已通过真实容器集成测试，包括工具闭环、超时清理、任务隔离和大输出截断；每次更改后仍应重新运行测试。
 
 ## 文档入口
 
@@ -66,4 +67,4 @@ PATCHFLOW_RUN_DOCKER_TESTS=1 python -m pytest -q tests/test_docker_integration.p
 - 当前版本不会调用 LLM 或 SWE-bench，因此不需要配置模型 API key。
 - `LocalRuntime` 共享宿主机内核、网络和当前用户权限，只适合可信代码与开发测试。
 - 不要把自己的工作仓库直接交给 `LocalRuntime`；应把任务复制到专用隔离根的子目录，并确保启动前 Git 工作区完全干净。
-- 正式执行未知仓库、SWE-bench 或模型生成的高风险命令前，必须先完成 DockerRuntime 的真实容器集成验收与风险审查。
+- DockerRuntime 已完成基础集成验收，但它不是通用安全边界的证明；正式执行未知仓库、SWE-bench 或模型生成的高风险命令前仍需按部署环境进行风险审查。

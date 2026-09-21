@@ -3,10 +3,15 @@
 from __future__ import annotations  # 启用延迟解析类型标注。
 
 import asyncio  # 导入同步 pytest 中运行异步工具链的能力。
+import os  # 导入 Docker 集成测试显式开关。
 import sys  # 导入当前 Python 解释器以运行临时仓库测试。
 from pathlib import Path  # 导入 pytest 临时路径类型。
 
+import pytest  # 导入参数化和条件跳过能力。
+
+from patchflow.domain.runtime import Runtime  # 导入两个后端共享的运行时协议。
 from patchflow.domain.tools import ToolCall  # 导入结构化工具调用模型。
+from patchflow.runtime.docker import DockerRuntime  # 导入真实容器运行时。
 from patchflow.runtime.local import LocalRuntime  # 导入工具所依赖的真实本地运行时。
 from patchflow.tools import (  # 导入本阶段提供的全部内置工具。
     ApplyPatchTool,  # 导入补丁应用工具。
@@ -28,9 +33,17 @@ def _call(call_id: str, tool_name: str, arguments: dict[str, object]) -> ToolCal
     )  # 返回经过领域模型校验的工具调用。
 
 
-def test_repository_tools_complete_read_patch_test_diff_and_reset_cycle(tmp_path: Path) -> None:  # 验证核心闭环。
+@pytest.mark.parametrize("backend", ("local", "docker"))  # 同一工具契约在两种 Runtime 上运行。
+def test_repository_tools_complete_read_patch_test_diff_and_reset_cycle(tmp_path: Path, backend: str) -> None:  # 验证核心闭环。
     repository = create_temporary_git_repository(tmp_path)  # 创建受控临时 Git 仓库。
-    runtime = LocalRuntime(repository.repository, repository.isolation_root)  # 创建真实本地运行时。
+    if backend == "docker" and os.environ.get("PATCHFLOW_RUN_DOCKER_TESTS") != "1":  # 默认不启动真实容器。
+        pytest.skip("需要显式开启 Docker 集成测试")  # 避免普通单测依赖 daemon。
+    runtime: Runtime = (  # 使用领域协议持有两种具体后端。
+        DockerRuntime(repository.repository)  # Docker 后端只读挂载源仓库。
+        if backend == "docker"  # 根据参数选择容器后端。
+        else LocalRuntime(repository.repository, repository.isolation_root)  # 否则使用本地隔离目录后端。
+    )  # 完成运行时选择。
+    python_command = "python" if backend == "docker" else sys.executable  # 使用各执行环境自己的解释器。
     search_tool = SearchTextTool()  # 创建文本搜索工具。
     read_tool = ReadCodeTool()  # 创建代码读取工具。
     patch_tool = ApplyPatchTool()  # 创建补丁应用工具。
@@ -61,7 +74,7 @@ def test_repository_tools_complete_read_patch_test_diff_and_reset_cycle(tmp_path
             _call(  # 构造参数数组形式的测试调用。
                 "call-tests",  # 设置测试调用 ID。
                 "run_tests",  # 指定测试工具名称。
-                {"command": [sys.executable, "-m", "pytest", "-q"], "timeout_seconds": 30.0},  # 设置命令和硬超时。
+                {"command": [python_command, "-m", "pytest", "-q"], "timeout_seconds": 30.0},  # 设置命令和硬超时。
             ),  # 完成测试调用构造。
             runtime,  # 传入真实运行时。
         )  # 完成测试执行。

@@ -52,7 +52,8 @@ def create_temporary_git_repository(tmp_path: Path) -> TemporaryGitRepository:  
     (repository / "app.py").write_text(app_content, encoding="utf-8")  # 写入产品代码文件。
     (repository / "test_app.py").write_text(test_content, encoding="utf-8")  # 写入公开测试文件。
     (repository / "README.md").write_text("# Temporary Repository\n", encoding="utf-8")  # 写入搜索辅助文档。
-    _run_git(repository, "add", "app.py", "test_app.py", "README.md")  # 暂存初始仓库文件。
+    (repository / ".gitignore").write_text(".pytest_cache/\n__pycache__/\n", encoding="utf-8")  # 忽略测试工具产生的缓存目录。
+    _run_git(repository, "add", "app.py", "test_app.py", "README.md", ".gitignore")  # 暂存初始仓库文件。
     _run_git(repository, "commit", "-m", "Create temporary test repository")  # 创建任务基础提交。
     base_commit = _run_git(repository, "rev-parse", "HEAD")  # 读取完整基础提交 SHA。
     task = TaskSpec(  # 创建与真实临时仓库一致的任务定义。
@@ -92,4 +93,3 @@ def valid_patch() -> str:  # 定义可以应用到临时仓库的候选补丁。
         "-    return f\"Hello, {name}!\"  # 返回包含输入姓名的问候语。\n"  # 删除直接使用原始输入的实现。
         "+    return f\"Hello, {cleaned_name}!\"  # 使用规范化姓名生成问候语。\n"  # 添加新返回实现。
     )  # 完成标准补丁文本。
-

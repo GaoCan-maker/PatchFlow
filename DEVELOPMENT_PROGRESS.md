@@ -7,10 +7,10 @@
 
 | 项目 | 当前状态 |
 |---|---|
-| 当前里程碑 | 第 2 周：Runtime 与工具闭环 |
-| 当前步骤 | Step 2B：DockerRuntime 最小实现（代码完成，真实容器验收待执行） |
-| 项目阶段 | 本地闭环已验收；容器后端需先启用 WSL Docker Integration |
-| 下一步骤 | 完成 Docker 实测，再进入 Step 3 Baseline Agent |
+| 当前里程碑 | 第 2 周收尾完成，准备进入第 3 周 Baseline Agent |
+| 当前步骤 | Step 2C：补丁完整性、流式输出与真实容器安全验收（已完成） |
+| 项目阶段 | 本地与 Docker 核心工具闭环均已通过真实测试 |
+| 下一步骤 | Step 3A：模型协议、FakeModel 与可记录轨迹的最小 Linear ReAct |
 | 最后更新 | 2026-09-21 |
 
 ## 2. 本轮目标
@@ -89,7 +89,7 @@
 
 ### Step 2B：DockerRuntime 最小安全版本
 
-状态：实现与无 daemon 单测完成；真实容器集成测试未运行，不能宣称 Docker 安全验收通过。
+状态：最小 Docker 后端已通过真实容器集成测试；以下环境探测记录保留当时状态，最新验收见 Step 2C。
 
 已完成：
 
@@ -104,11 +104,11 @@
 - 新增无 daemon 单测和显式开关控制的真实 Docker 集成测试。
 - 新增 ADR-0003，记录容器复制、只读挂载、超时销毁与剩余风险。
 
-环境探测结果：
+实现时的环境探测结果（历史记录，现已解决）：
 
 - `Ubuntu-22.04` 当前能找到 Docker Desktop Windows 路径下的 `docker` 入口，但运行时提示本发行版没有启用 WSL Integration。
 - 因此本轮未构建镜像、未启动容器，也未执行真实 Docker 集成测试。
-- 不需要注册模型 API；需要在 Docker Desktop 中开启 `Ubuntu-22.04` 的 WSL Integration，再从 WSL 执行 README 中的构建和测试命令。
+- 当时不需要注册模型 API；随后已启用 WSL Integration 并构建镜像，见 Step 2C 验证。
 
 验证结果：
 
@@ -116,12 +116,43 @@
 - 本轮新增 Python 文件通过 Ruff：`All checks passed!`。
 - 单测验证安全启动参数、只读挂载、非 root 用户、资源限制、补丁预检、协议兼容与超时清理的编排逻辑。
 
-未完成或待实测：
+当时未完成或待实测（后续状态见 Step 2C）：
 
 - 真实 Docker 启动、只读挂载权限、容器内 Git/pytest、环境变量隔离与符号链接策略测试。
 - 当前 Git diff 与 Step 2A 一样仅包含已跟踪文件修改；新增文件如何纳入最终 patch 需在正式 Agent 输出前解决。
 - Docker CLI 当前使用 `communicate()` 捕获完整输出后截断，极端大量输出仍可能占用宿主内存；需要流式上限。
 - 当前没有独立 Docker 磁盘配额与高级 seccomp/AppArmor 策略，也没有未知恶意仓库的红队验收。
+
+### Step 2C：补丁完整性、流式输出与真实容器验收
+
+状态：已完成；本阶段无需模型 API。
+
+已完成：
+
+- 在 WSL2 + Docker Desktop 中复跑用户报告的集成测试，结果 `1 passed in 2.37s`。
+- LocalRuntime 与 DockerRuntime 的 `get_diff()` 现在合并已跟踪文件修改，以及 `git ls-files --others --exclude-standard -z` 枚举的未跟踪新文件。
+- 新文件通过 `git diff --no-index --binary` 与空设备比较生成标准可应用 patch；不修改 Git 索引。
+- Git 列表、单文件差异或合并补丁超出控制面预算时显式失败，不返回截断的“最终 patch”。
+- 新增 `OutputAccumulator`，Docker CLI stdout/stderr 在异步读取时仅保存有限头尾内容，并通过增量 UTF-8 解码保留跨块字符。
+- 新增真实容器测试：大输出截断、命令超时后的容器销毁、两个任务容器的工作区隔离。
+- 将工具闭环测试参数化，确认同一组结构化工具可在 LocalRuntime 和 DockerRuntime 上工作。
+- 临时 Python 仓库测试夹具增加 `.gitignore`，避免 pytest 缓存被误认为候选源码文件。
+- 新增 ADR-0004，记录补丁完整性与流式输出决策。
+
+验证结果：
+
+- WSL `patchflow` 环境在 `PATCHFLOW_RUN_DOCKER_TESTS=1` 下全量 pytest：`41 passed in 9.30s`。
+- 真实 Docker 集成测试单独运行：`3 passed in 5.47s`。
+- 修改的 Runtime 与测试文件 Ruff：`All checks passed!`。
+- LocalRuntime 测试验证“已跟踪修改 + 新文件”组合 patch 经 reset 后可重新应用。
+- Docker 测试验证新文件进入 diff、20 万字符输出受限、超时销毁容器、两个任务互不污染。
+
+仍需注意：
+
+- 被 `.gitignore` 忽略的文件不会进入最终 patch，这是当前明确约定。
+- Git 带引号转义的特殊路径尚不受 patch 路径解析器支持；超大补丁会显式失败。
+- LocalRuntime 的底层子进程仍在完整读取后截断，尚未复用 Docker 的流式输出收集器；它仍只用于可信仓库。
+- Docker 容器有默认资源限制，但不是绝对安全沙箱；尚未完成恶意仓库红队测试与高级 seccomp/AppArmor 策略。
 
 ## 4. 验证记录
 
@@ -134,7 +165,7 @@
 - pytest：8.4.2。
 - Ruff：0.16.8。
 
-自动验证结果：
+Step 2A 当时的自动验证结果（后续全量结果见 Step 2C）：
 
 - [x] 全量 pytest：`32 passed in 2.06s`。
 - [x] 新增 Runtime、工具和测试文件通过 Ruff：`All checks passed!`。
@@ -160,7 +191,7 @@
 
 - LocalRuntime 不是 Docker 沙箱，共享宿主机内核、网络和当前 Linux 用户权限。
 - LocalRuntime 只允许用于可信代码和专用临时仓库，不能直接运行未知 GitHub 仓库。
-- LocalRuntime 没有 CPU、内存、PID、磁盘和网络级资源限制；DockerRuntime 已配置部分限制，但尚未在真实 daemon 验证。
+- LocalRuntime 没有 CPU、内存、PID、磁盘和网络级资源限制；DockerRuntime 的默认限制已在真实 daemon 启动并通过小型任务测试。
 - Windows 原生环境只能可靠终止直接子进程；进程组终止能力以 Linux/WSL 为目标平台。
 - `git clean -fd` 不删除 ignored 文件，因此缓存可能保留；后续候选隔离将用独立 worktree 或容器处理。
 - patch 路径暂不支持 Git 的带引号转义文件名。
@@ -170,19 +201,18 @@
 
 ## 6. 下一步计划
 
-下一步先完成 Step 2B 的真实 Docker 验收，再进入 Step 3。
+下一步进入 Step 3A：模型协议、FakeModel 与最小 Baseline Agent。
 
 计划顺序：
 
-1. 在 Docker Desktop 为 `Ubuntu-22.04` 开启 WSL Integration，并用 `docker version` 确认 daemon 可用。
-2. 在 WSL 项目根目录构建 `patchflow-runtime:py311` 镜像。
-3. 显式开启并运行 `tests/test_docker_integration.py`，修复真实容器与 WSL 挂载语义发现的问题。
-4. 增加真实命令超时、任务间隔离及受限资源的容器测试。
-5. 解决新增文件未进入 Git diff 和大量输出在宿主积累的问题。
-6. 将工具契约测试在 LocalRuntime 和 DockerRuntime 上共享。
-7. 完成 Step 2B 验收后实现 fake model 驱动的 Baseline Agent。
+1. 定义与 provider 无关的模型请求、回复、工具调用和 token 使用量协议。
+2. 实现可脚本化的 FakeModel，驱动确定性 search/read/patch/test/finish 轨迹。
+3. 让最小 Linear ReAct 通过统一 Tool 与 Runtime 协议执行，记录 AgentEvent 和 ToolResult。
+4. 加入模型调用、工具调用和墙钟预算以及明确终止条件。
+5. 用临时仓库与 DockerRuntime 验证成功、测试失败、无效工具调用和预算耗尽路径。
+6. 此后再实现真实 provider adapter；届时才需要配置模型 API。
 
-进入 Step 3 的门槛：DockerRuntime 最小版本及其安全测试完成后，再实现 deterministic fake model 驱动的 Baseline Agent。真实模型 API 会在模型适配器阶段才需要配置。
+进入 Step 3 的门槛已满足：DockerRuntime 最小版本及其真实容器集成测试已完成。下一轮实现 deterministic FakeModel 驱动的 Baseline Agent；真实模型 API 会在模型适配器阶段才需要配置。
 
 ## 7. 变更纪律
 

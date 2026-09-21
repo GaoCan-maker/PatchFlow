@@ -3,6 +3,7 @@
 from __future__ import annotations  # 启用延迟类型标注。
 
 import asyncio  # 使用异步子进程执行 Docker CLI。
+import codecs  # 增量解码 UTF-8 管道输出以支持跨块字符。
 import json  # 序列化传入容器的路径策略。
 import os  # 获取当前非 root 用户 ID 和最小环境。
 import time  # 记录命令墙钟耗时。
@@ -19,7 +20,7 @@ from patchflow.runtime.errors import (  # 复用运行时异常。
     RuntimeNotStartedError,  # 导入生命周期异常。
     WorkspaceSafetyError,  # 导入隔离环境异常。
 )  # 结束运行时异常导入列表。
-from patchflow.runtime.output import truncate_text  # 对子进程输出进行限长。
+from patchflow.runtime.output import OutputAccumulator  # 在读取管道时就限制内存占用。
 from patchflow.runtime.paths import WorkspacePathResolver  # 在宿主侧执行保守路径策略检查。
 
 _REPOSITORY = "/work/repo"  # 固定容器内的可写仓库路径。
@@ -40,6 +41,13 @@ _READ_SCRIPT = "\n".join(  # 构造在容器内执行的路径验证和按行读
         "sys.stdout.write(''.join(lines[int(sys.argv[2]) - 1:int(sys.argv[3])]))",  # 输出包含式行范围。
     )  # 结束容器内程序逐行定义。
 )  # 完成容器读取程序。
+
+
+async def _drain_stream(stream: asyncio.StreamReader, accumulator: OutputAccumulator) -> None:  # 流式排空一个管道。
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")  # 创建可处理拆分 UTF-8 字符的解码器。
+    while chunk := await stream.read(65_536):  # 分块读取以避免缓存完整命令输出。
+        accumulator.append(decoder.decode(chunk))  # 只保留有限头尾字符并统计总长度。
+    accumulator.append(decoder.decode(b"", final=True))  # 输出可能残留的不完整末尾字符。
 
 
 class DockerRuntimeConfig(BaseModel):  # 定义容器资源与镜像配置。
@@ -161,7 +169,20 @@ class DockerRuntime:  # 实现领域 Runtime 协议的 Docker 后端。
         result = await self._git("diff", "--no-ext-diff", "--binary", self._require_base(), "--")  # 禁用外部 diff 程序。
         if result.output_truncated:  # 检查导出的补丁是否完整。
             raise WorkspaceSafetyError("Git diff 超过控制面输出上限，不能作为最终补丁")  # 禁止提交损坏 diff。
-        return result.stdout  # 返回可能受输出预算限制的标准 diff。
+        untracked = await self._git("ls-files", "--others", "--exclude-standard", "-z")  # 枚举未跟踪且未忽略的新增文件。
+        patches = [result.stdout]  # 首先保存已跟踪文件的差异。
+        for path in filter(None, untracked.stdout.split("\x00")):  # 按 Git 返回顺序逐个处理新文件。
+            added = await self._container_call(  # 与空设备比较以生成 Git new file patch。
+                ("git", "diff", "--no-ext-diff", "--no-index", "--binary", "--", os.devnull, path),  # 不修改容器索引。
+                timeout_seconds=30.0,  # 限制单文件 diff 耗时。
+                output_limit=_CONTROL_OUTPUT_LIMIT,  # 保持完整控制面输出。
+            )  # 完成新文件补丁生成。
+            if added.timed_out or added.return_code != 1 or added.output_truncated:  # 只接受 Git 有差异的正常退出。
+                raise WorkspaceSafetyError(f"无法完整导出新增文件: {path}")  # 禁止漏掉新增文件。
+            patches.append(added.stdout)  # 追加当前新文件补丁。
+            if sum(len(item) for item in patches) > _CONTROL_OUTPUT_LIMIT:  # 检查最终补丁总长度。
+                raise WorkspaceSafetyError("最终 Git diff 超过控制面输出上限")  # 避免返回不完整补丁。
+        return "".join(patches)  # 返回已跟踪修改和新增文件的完整统一 diff。
 
     async def reset(self) -> None:  # 丢弃当前容器副本中的候选修改。
         self._ensure_started()  # 仅允许已验证的任务容器执行重置。
@@ -306,17 +327,41 @@ class DockerRuntime:  # 实现领域 Runtime 协议的 Docker 后端。
             )  # 完成 CLI 进程创建。
         except OSError as error:  # Docker 二进制可能不存在。
             return CommandResult(command, None, "", str(error), time.perf_counter() - started_at, termination_reason="process_start_failed")  # 返回结构化启动失败。
+        limit = output_limit or self._config.max_output_chars  # 选择控制面或 Agent 观察的字符预算。
+        stdout_buffer = OutputAccumulator(limit)  # 为标准输出分配固定上限的头尾缓存。
+        stderr_buffer = OutputAccumulator(limit)  # 为标准错误分配独立固定上限的头尾缓存。
+        stdout_task = asyncio.create_task(_drain_stream(process.stdout, stdout_buffer))  # 异步持续排空标准输出。
+        stderr_task = asyncio.create_task(_drain_stream(process.stderr, stderr_buffer))  # 异步持续排空错误输出。
+
+        async def send_input() -> None:  # 定义可选标准输入发送任务。
+            if process.stdin is None or input_text is None:  # 没有输入管道时无需写入。
+                return  # 直接结束可选发送任务。
+            try:  # 容器命令可能在接收完整输入前退出。
+                process.stdin.write(input_text.encode("utf-8"))  # 将补丁编码并写入 Docker stdin。
+                await process.stdin.drain()  # 等待输入缓冲区被持续消费。
+            except (BrokenPipeError, ConnectionResetError):  # 捕获容器进程提前退出。
+                pass  # 后续依靠真实退出码和 stderr 报告失败。
+            finally:  # 无论命令结果如何都关闭标准输入。
+                process.stdin.close()  # 告知容器补丁输入已结束。
+
+        input_task = asyncio.create_task(send_input())  # 与两个输出读取任务同时发送输入。
         try:  # 对完整通信施加硬超时。
-            stdout_bytes, stderr_bytes = await asyncio.wait_for(  # 等待 CLI 退出并排空输出管道。
-                process.communicate(input_text.encode("utf-8") if input_text is not None else None),  # 发送可选补丁数据。
+            await asyncio.wait_for(  # 等待进程退出、输入结束与两个输出管道排空。
+                asyncio.gather(process.wait(), stdout_task, stderr_task, input_task),  # 并发推进所有管道任务。
                 timeout=timeout_seconds,  # 应用本次命令时限。
             )  # 完成通信等待。
         except TimeoutError:  # 捕获 Docker CLI 或容器命令超时。
-            process.kill()  # 立即终止本地 Docker CLI 进程。
-            stdout_bytes, stderr_bytes = await process.communicate()  # 回收进程和已有输出。
-            stdout, stdout_cut = truncate_text(stdout_bytes.decode("utf-8", errors="replace"), output_limit or self._config.max_output_chars)  # 限制超时输出。
-            stderr, stderr_cut = truncate_text(stderr_bytes.decode("utf-8", errors="replace"), output_limit or self._config.max_output_chars)  # 限制错误输出。
+            if process.returncode is None:  # 防御进程恰好在超时边界自行退出。
+                process.kill()  # 立即终止本地 Docker CLI 进程。
+            await process.wait()  # 回收本地子进程，避免僵尸进程。
+            stdout, stdout_cut = stdout_buffer.finish()  # 提取超时前的有限标准输出。
+            stderr, stderr_cut = stderr_buffer.finish()  # 提取超时前的有限错误输出。
             return CommandResult(command, process.returncode, stdout, stderr, time.perf_counter() - started_at, True, stdout_cut or stderr_cut, "timeout")  # 返回超时状态。
-        stdout, stdout_cut = truncate_text(stdout_bytes.decode("utf-8", errors="replace"), output_limit or self._config.max_output_chars)  # 限制标准输出。
-        stderr, stderr_cut = truncate_text(stderr_bytes.decode("utf-8", errors="replace"), output_limit or self._config.max_output_chars)  # 限制错误输出。
+        except asyncio.CancelledError:  # 外层任务被取消时同样要清理宿主 CLI 进程。
+            if process.returncode is None:  # 只终止仍在运行的进程。
+                process.kill()  # 阻止取消后留下 Docker CLI 子进程。
+            await process.wait()  # 回收已终止进程。
+            raise  # 保留原始取消语义。
+        stdout, stdout_cut = stdout_buffer.finish()  # 获取完整或受限的标准输出。
+        stderr, stderr_cut = stderr_buffer.finish()  # 获取完整或受限的错误输出。
         return CommandResult(command, process.returncode, stdout, stderr, time.perf_counter() - started_at, output_truncated=stdout_cut or stderr_cut)  # 返回普通命令结果。

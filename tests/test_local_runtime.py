@@ -86,13 +86,24 @@ def test_runtime_applies_patch_generates_diff_and_resets(tmp_path: Path) -> None
         assert applied.changed_files == ("app.py",)  # 验证返回规范化修改文件列表。
         modified_content = await runtime.read_file("app.py")  # 读取补丁后的完整代码。
         assert "cleaned_name = name.strip()" in modified_content  # 验证目标代码确实进入工作区。
+        created = await runtime.execute(  # 通过 Runtime 在临时仓库中新建一个模块。
+            (sys.executable, "-c", "from pathlib import Path; Path('new_module.py').write_text('VALUE = 1\\n')"),  # 写入可识别的新增文件。
+            timeout_seconds=2.0,  # 限制新文件创建耗时。
+        )  # 完成容器无关的新增文件命令。
+        assert created.succeeded  # 验证新增文件已经写入工作区。
         diff = await runtime.get_diff()  # 导出相对于基础提交的候选差异。
         assert "diff --git a/app.py b/app.py" in diff  # 验证 diff 包含目标文件头。
         assert "+    cleaned_name = name.strip()" in diff  # 验证 diff 包含新增逻辑。
+        assert "diff --git a/new_module.py b/new_module.py" in diff  # 验证新增文件也进入最终 patch。
         await runtime.reset()  # 回滚所有候选修改。
         restored_content = await runtime.read_file("app.py")  # 重新读取被回滚文件。
         assert restored_content == initial_content  # 验证内容精确恢复到基础提交。
+        assert not (repository.repository / "new_module.py").exists()  # 验证新增文件也被回滚。
         assert await runtime.get_diff() == ""  # 验证回滚后不存在残留差异。
+        reapplied = await runtime.apply_patch(diff)  # 检查导出的组合补丁能重新应用。
+        assert reapplied.applied  # 验证组合补丁格式对 Git 有效。
+        assert (repository.repository / "new_module.py").read_text(encoding="utf-8") == "VALUE = 1\n"  # 验证新文件内容恢复。
+        await runtime.reset()  # 为本测试清理重新应用的候选修改。
         await runtime.close()  # 关闭本次运行时。
 
     asyncio.run(scenario())  # 运行异步补丁场景。

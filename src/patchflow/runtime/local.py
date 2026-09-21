@@ -201,16 +201,36 @@ class LocalRuntime:  # 定义本地隔离运行时。
         )  # 完成成功结果。
 
     async def get_diff(self) -> str:  # 实现标准 Git diff 导出协议。
-        """返回工作区相对于基础提交的二进制安全 diff。"""  # 说明 diff 可作为最终 patch 候选。
+        """返回已跟踪修改和新增文件的完整统一 diff。"""  # 说明最终 patch 包含新增文件。
 
         self._ensure_started()  # 阻止启动前读取未定义工作区状态。
         result = await self._run_process(  # 请求 Git 生成相对于基础提交的 diff。
             ("git", "diff", "--no-ext-diff", "--binary", self._require_base_commit(), "--"),  # 禁止外部 diff 工具。
             timeout_seconds=30.0,  # 限制 diff 生成耗时。
+            output_limit_chars=_CONTROL_OUTPUT_CHARS,  # 使用独立预算保存完整控制面补丁。
         )  # 完成 diff 命令。
-        if not result.succeeded:  # 检查 Git 是否成功生成 diff。
+        if not result.succeeded or result.output_truncated:  # 检查 Git diff 是否完整生成。
             raise WorkspaceSafetyError(f"无法生成 Git diff：{result.stderr}")  # 将基础设施问题显式上抛。
-        return result.stdout  # 返回可能已按统一规则截断的 diff 文本。
+        untracked = await self._run_process(  # 查询 Git 未跟踪且未被忽略的新增文件。
+            ("git", "ls-files", "--others", "--exclude-standard", "-z"),  # 用 NUL 分隔保证空格文件名不被误拆。
+            timeout_seconds=30.0,  # 限制文件枚举耗时。
+            output_limit_chars=_CONTROL_OUTPUT_CHARS,  # 保证文件列表不被静默截断。
+        )  # 完成新增文件枚举。
+        if not untracked.succeeded or untracked.output_truncated:  # 检查文件列表是否完整。
+            raise WorkspaceSafetyError("无法完整枚举新增文件")  # 禁止遗漏新文件后输出不完整 patch。
+        patches = [result.stdout]  # 先保存已跟踪文件修改。
+        for path in filter(None, untracked.stdout.split("\x00")):  # 按 Git 返回顺序处理每个新增文件。
+            added = await self._run_process(  # 为单个新增文件生成标准可应用的 Git diff。
+                ("git", "diff", "--no-ext-diff", "--no-index", "--binary", "--", os.devnull, path),  # 与空设备比较得到 new file patch。
+                timeout_seconds=30.0,  # 限制单文件 diff 耗时。
+                output_limit_chars=_CONTROL_OUTPUT_CHARS,  # 防止大文件补丁被截断。
+            )  # 完成新增文件 diff。
+            if added.timed_out or added.return_code != 1 or added.output_truncated:  # Git diff 退出码一表示有差异。
+                raise WorkspaceSafetyError(f"无法完整导出新增文件：{path}")  # 禁止提交缺失或损坏的新增文件。
+            patches.append(added.stdout)  # 将新增文件 patch 追加到最终结果。
+            if sum(len(item) for item in patches) > _CONTROL_OUTPUT_CHARS:  # 检查合并后的总补丁大小。
+                raise WorkspaceSafetyError("最终 Git diff 超过控制面输出上限")  # 明确要求缩小补丁或提高预算。
+        return "".join(patches)  # 返回可被 git apply 消费的完整统一 diff。
 
     async def reset(self) -> None:  # 实现候选工作区回滚协议。
         """把隔离工作区恢复到启动时验证的基础提交。"""  # 明确该方法具有破坏性但只作用于隔离目录。
