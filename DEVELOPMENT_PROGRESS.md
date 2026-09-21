@@ -8,10 +8,10 @@
 | 项目 | 当前状态 |
 |---|---|
 | 当前里程碑 | 第 2 周：Runtime 与工具闭环 |
-| 当前步骤 | Step 2A：LocalRuntime 与核心结构化工具（已完成） |
-| 项目阶段 | 本地可信仓库闭环可运行，尚未达到未知代码安全执行条件 |
-| 下一步骤 | Step 2B：DockerRuntime 最小安全版本 |
-| 最后更新 | 2026-09-20 |
+| 当前步骤 | Step 2B：DockerRuntime 最小实现（代码完成，真实容器验收待执行） |
+| 项目阶段 | 本地闭环已验收；容器后端需先启用 WSL Docker Integration |
+| 下一步骤 | 完成 Docker 实测，再进入 Step 3 Baseline Agent |
+| 最后更新 | 2026-09-21 |
 
 ## 2. 本轮目标
 
@@ -87,6 +87,42 @@
 - Ruff 忽略 `E501` 与 `RUF001/2/3`：逐行中文注释会自然产生长行和全角标点，这些规则只影响排版。
 - 当前阶段没有新增运行时依赖，也不需要模型 API key。
 
+### Step 2B：DockerRuntime 最小安全版本
+
+状态：实现与无 daemon 单测完成；真实容器集成测试未运行，不能宣称 Docker 安全验收通过。
+
+已完成：
+
+- 新增 `DockerRuntimeConfig`，使用 Pydantic 限定镜像、CPU、内存、PID、tmpfs 和输出预算。
+- 新增 `DockerRuntime`，实现现有 Runtime 协议；模型与工具层无需知道 Docker CLI 细节。
+- 只读挂载本地源仓库到 `/source`，以非 root 用户复制到 `/work/repo` 私有 tmpfs；命令、Git、补丁、测试均在容器内执行。
+- Docker 启动固定使用 `--network none`、`--read-only`、`--cap-drop ALL`、`no-new-privileges`、CPU/内存/PID 上限及受限 tmpfs。
+- 容器只继承显式设置的 HOME 和 PYTHONDONTWRITEBYTECODE，不透传模型 API key；宿主 Docker CLI 也使用最小环境变量列表。
+- 读取文件在宿主和容器中双重检查真实路径与路径策略，防止容器内新增符号链接绕过 `.git` 等拒绝规则。
+- 所有容器命令使用参数数组和硬超时；任意容器命令超时后销毁容器，避免残留后台进程。
+- 新增最小 Python/Git/pytest Dockerfile 和 `.dockerignore` 构建上下文白名单。
+- 新增无 daemon 单测和显式开关控制的真实 Docker 集成测试。
+- 新增 ADR-0003，记录容器复制、只读挂载、超时销毁与剩余风险。
+
+环境探测结果：
+
+- `Ubuntu-22.04` 当前能找到 Docker Desktop Windows 路径下的 `docker` 入口，但运行时提示本发行版没有启用 WSL Integration。
+- 因此本轮未构建镜像、未启动容器，也未执行真实 Docker 集成测试。
+- 不需要注册模型 API；需要在 Docker Desktop 中开启 `Ubuntu-22.04` 的 WSL Integration，再从 WSL 执行 README 中的构建和测试命令。
+
+验证结果：
+
+- WSL `patchflow` 环境全量 pytest：`35 passed, 1 skipped in 2.17s`，跳过项为真实容器集成测试。
+- 本轮新增 Python 文件通过 Ruff：`All checks passed!`。
+- 单测验证安全启动参数、只读挂载、非 root 用户、资源限制、补丁预检、协议兼容与超时清理的编排逻辑。
+
+未完成或待实测：
+
+- 真实 Docker 启动、只读挂载权限、容器内 Git/pytest、环境变量隔离与符号链接策略测试。
+- 当前 Git diff 与 Step 2A 一样仅包含已跟踪文件修改；新增文件如何纳入最终 patch 需在正式 Agent 输出前解决。
+- Docker CLI 当前使用 `communicate()` 捕获完整输出后截断，极端大量输出仍可能占用宿主内存；需要流式上限。
+- 当前没有独立 Docker 磁盘配额与高级 seccomp/AppArmor 策略，也没有未知恶意仓库的红队验收。
+
 ## 4. 验证记录
 
 验证环境：
@@ -124,7 +160,7 @@
 
 - LocalRuntime 不是 Docker 沙箱，共享宿主机内核、网络和当前 Linux 用户权限。
 - LocalRuntime 只允许用于可信代码和专用临时仓库，不能直接运行未知 GitHub 仓库。
-- 当前没有 CPU、内存、PID、磁盘和网络级资源限制。
+- LocalRuntime 没有 CPU、内存、PID、磁盘和网络级资源限制；DockerRuntime 已配置部分限制，但尚未在真实 daemon 验证。
 - Windows 原生环境只能可靠终止直接子进程；进程组终止能力以 Linux/WSL 为目标平台。
 - `git clean -fd` 不删除 ignored 文件，因此缓存可能保留；后续候选隔离将用独立 worktree 或容器处理。
 - patch 路径暂不支持 Git 的带引号转义文件名。
@@ -134,18 +170,17 @@
 
 ## 6. 下一步计划
 
-下一步进入 Step 2B：DockerRuntime 最小安全版本。
+下一步先完成 Step 2B 的真实 Docker 验收，再进入 Step 3。
 
 计划顺序：
 
-1. 检查 WSL 中 Docker Engine / Docker Desktop 集成是否可用，并记录版本与资源条件。
-2. 定义 `DockerRuntimeConfig`：镜像、CPU、内存、PID、网络、只读挂载、临时目录和超时。
-3. 实现最小 DockerRuntime，复用现有 `Runtime` 协议和 `CommandResult`。
-4. 默认禁用网络，不挂载用户主目录、SSH、云凭据和 Docker socket。
-5. 让任务工作区以受控方式进入容器，并支持 base commit、补丁、diff 和 reset。
-6. 将 LocalRuntime 工具集测试参数化，使同一组契约测试可以验证两个 Runtime。
-7. 增加容器超时、资源限制、环境变量泄漏和任务间隔离测试。
-8. 更新 ADR、README 和本文档。
+1. 在 Docker Desktop 为 `Ubuntu-22.04` 开启 WSL Integration，并用 `docker version` 确认 daemon 可用。
+2. 在 WSL 项目根目录构建 `patchflow-runtime:py311` 镜像。
+3. 显式开启并运行 `tests/test_docker_integration.py`，修复真实容器与 WSL 挂载语义发现的问题。
+4. 增加真实命令超时、任务间隔离及受限资源的容器测试。
+5. 解决新增文件未进入 Git diff 和大量输出在宿主积累的问题。
+6. 将工具契约测试在 LocalRuntime 和 DockerRuntime 上共享。
+7. 完成 Step 2B 验收后实现 fake model 驱动的 Baseline Agent。
 
 进入 Step 3 的门槛：DockerRuntime 最小版本及其安全测试完成后，再实现 deterministic fake model 驱动的 Baseline Agent。真实模型 API 会在模型适配器阶段才需要配置。
 

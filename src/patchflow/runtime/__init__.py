@@ -1,5 +1,9 @@
 """PatchFlow 运行时实现。"""  # 说明当前包负责提供受控执行环境。
 
+from patchflow.runtime.docker import (  # 导出 Docker 执行后端及其配置。
+    DockerRuntime,  # 导出容器运行时实现。
+    DockerRuntimeConfig,  # 导出容器资源配置模型。
+)  # 结束 Docker 后端导入列表。
 from patchflow.runtime.errors import (  # 导出调用方需要识别的运行时异常。
     DirtyWorkspaceError,  # 导出工作区不干净异常。
     PathViolationError,  # 导出路径策略违规异常。
@@ -12,6 +16,8 @@ from patchflow.runtime.paths import WorkspacePathResolver  # 导出安全路径�
 
 __all__ = [  # 明确该包稳定暴露的公共名称。
     "DirtyWorkspaceError",  # 暴露工作区状态异常。
+    "DockerRuntime",  # 暴露容器运行时。
+    "DockerRuntimeConfig",  # 暴露容器资源配置。
     "LocalRuntime",  # 暴露本地运行时。
     "PathViolationError",  # 暴露路径违规异常。
     "RuntimeNotStartedError",  # 暴露生命周期异常。
@@ -19,4 +25,3 @@ __all__ = [  # 明确该包稳定暴露的公共名称。
     "WorkspaceSafetyError",  # 暴露工作区安全异常。
     "truncate_text",  # 暴露输出截断函数。
 ]  # 结束公共名称列表。
-

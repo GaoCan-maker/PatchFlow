@@ -1,0 +1,7 @@
+# 镜像构建只发送代码与包元数据，避免把仓库历史、凭据或任务数据送入 Docker daemon。
+*
+!Dockerfile
+!pyproject.toml
+!README.md
+!src/
+!src/**
