@@ -7,10 +7,10 @@
 
 | 项目 | 当前状态 |
 |---|---|
-| 当前里程碑 | 第 2 周收尾完成，准备进入第 3 周 Baseline Agent |
-| 当前步骤 | Step 2C：补丁完整性、流式输出与真实容器安全验收（已完成） |
-| 项目阶段 | 本地与 Docker 核心工具闭环均已通过真实测试 |
-| 下一步骤 | Step 3A：模型协议、FakeModel 与可记录轨迹的最小 Linear ReAct |
+| 当前里程碑 | 第 3 周 Baseline Agent 开发中 |
+| 当前步骤 | Step 3A：模型协议、FakeModel 与最小 Linear ReAct（已完成） |
+| 项目阶段 | FakeModel 驱动的 Agent 闭环已在 LocalRuntime 和 DockerRuntime 通过测试 |
+| 下一步骤 | Step 3B：真实 provider 适配、上下文限制与剩余 baseline |
 | 最后更新 | 2026-09-21 |
 
 ## 2. 本轮目标
@@ -154,6 +154,37 @@
 - LocalRuntime 的底层子进程仍在完整读取后截断，尚未复用 Docker 的流式输出收集器；它仍只用于可信仓库。
 - Docker 容器有默认资源限制，但不是绝对安全沙箱；尚未完成恶意仓库红队测试与高级 seccomp/AppArmor 策略。
 
+### Step 3A：最小 Linear ReAct Agent
+
+状态：已完成；本阶段仍不需要模型 API key。
+
+已完成：
+
+- 新增 `ModelRequest`、`ModelResponse`、`ModelUsage` 和异步 `Model` 协议；每次回复必须是单个工具调用或结束说明。
+- 模型请求仅包含公开任务 ID、Issue 文本、线性历史和已注册工具声明；不传递 `TaskSpec.evaluation_ref` 等评测私有字段。
+- 新增脚本式 `FakeModel`，按预设回复产生确定性工具轨迹，并保存请求供测试检查。
+- 新增 `LinearReactAgent`：复用已有 Runtime、Tool、RunContext、AgentState、RunManifest 和 JSONL 事件存储。
+- 搜索、读取、补丁、测试与结束在同一线性历史中循环；未知工具、重复调用 ID 和参数错误作为可反馈观察处理。
+- 限制模型调用、Agent 步数、工具次数、token、命令耗时、成本和全局墙钟时间；超限停止并保留机器可读原因。
+- 成功必须由最新工作区公开测试通过且 Runtime 导出非空完整 patch 支撑；写工具调用使旧测试反馈失效。
+- Runtime 启动、模型回复、工具调用/结果、预算和终态写入因果关联的 AgentEvent，最终 manifest 与 patch 落盘。
+- LocalRuntime 在上层取消命令时主动终止进程树，防止全局墙钟超时留下后台进程。
+- 新增 ADR-0005，记录模型公开输入边界和 Baseline 验证规则。
+
+验证结果：
+
+- FakeModel 端到端专项测试覆盖 LocalRuntime 和真实 DockerRuntime 成功路径，以及失败测试、过期测试、未知工具、工具预算、token 预算、模型超时、正在执行的本地命令超时、评测私有字段隔离。
+- `PATCHFLOW_RUN_DOCKER_TESTS=1 python -m pytest -q tests/test_linear_agent.py`：`9 passed in 4.38s`。
+- `PATCHFLOW_RUN_DOCKER_TESTS=1 python -m pytest -q`：最终复跑 `50 passed in 13.01s`，包含真实 Docker Agent 路径。
+- 本轮新增模型、Agent 与测试文件 Ruff：`All checks passed!`；已有 Step 1/2 代码的历史 Ruff 风格债务未在本轮批量改写。
+
+当前边界：
+
+- 真实模型 provider adapter 尚未实现；FakeModel 只用于确定性正确性测试，不代表模型真实修复能力。
+- Linear ReAct 是无分支、无 Evidence Graph 的基线；完整状态机、反思、候选搜索和 SWE-bench 评测尚未接入。
+- 当前成功条件是公开测试通过，不等于隐藏测试或语义正确性通过；后续需接 Verifier Pyramid。
+- 结构化工具反馈目前放入线性历史，长轨迹上下文还没有压缩或 provider 级 token 预估。
+
 ## 4. 验证记录
 
 验证环境：
@@ -201,18 +232,17 @@ Step 2A 当时的自动验证结果（后续全量结果见 Step 2C）：
 
 ## 6. 下一步计划
 
-下一步进入 Step 3A：模型协议、FakeModel 与最小 Baseline Agent。
+下一步进入 Step 3B：真实 provider 适配、上下文限制与剩余 baseline。
 
 计划顺序：
 
-1. 定义与 provider 无关的模型请求、回复、工具调用和 token 使用量协议。
-2. 实现可脚本化的 FakeModel，驱动确定性 search/read/patch/test/finish 轨迹。
-3. 让最小 Linear ReAct 通过统一 Tool 与 Runtime 协议执行，记录 AgentEvent 和 ToolResult。
-4. 加入模型调用、工具调用和墙钟预算以及明确终止条件。
-5. 用临时仓库与 DockerRuntime 验证成功、测试失败、无效工具调用和预算耗尽路径。
-6. 此后再实现真实 provider adapter；届时才需要配置模型 API。
+1. 为至少一个真实模型提供商实现适配器，并明确密钥加载、网络失败、重试和用量上报；此时才需要注册或配置模型 API。
+2. 将模型上下文构建从完整线性历史改成有上限、可审计的输入，避免长轨迹超出上下文窗口。
+3. 实现 One-shot Patch 与 Bash-only baseline，复用同一任务、Runtime、预算和事件协议。
+4. 为模型调用超时、服务错误、无效结构化输出、超量工具结果补充确定性测试。
+5. 设计公开测试与更严格 Verifier 的区分，防止把公开测试通过误写成任务最终正确。
 
-进入 Step 3 的门槛已满足：DockerRuntime 最小版本及其真实容器集成测试已完成。下一轮实现 deterministic FakeModel 驱动的 Baseline Agent；真实模型 API 会在模型适配器阶段才需要配置。
+Step 3A 的 FakeModel 验收已完成。进入 Step 3B 前无需额外环境；届时接真实 provider 才需用户选择并提供相应 API 凭据。
 
 ## 7. 变更纪律
 

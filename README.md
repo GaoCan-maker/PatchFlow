@@ -2,7 +2,7 @@
 
 PatchFlow 是一个验证驱动的仓库级 Code Agent。系统计划接收代码仓库、基础提交和 Issue 描述，在隔离环境中完成问题理解、故障复现、代码定位、候选补丁生成、测试验证和最终补丁输出。
 
-当前仓库已经完成领域骨架、LocalRuntime 工具闭环，以及 DockerRuntime 的真实容器集成验收。现阶段尚未接入真实模型和 Agent loop。
+当前仓库已经完成领域骨架、LocalRuntime 与 DockerRuntime 工具闭环，以及 FakeModel 驱动的最小 Linear ReAct Agent。尚未接入真实模型 provider 和完整 PatchFlow 策略。
 
 ## 当前能力
 
@@ -17,6 +17,8 @@ PatchFlow 是一个验证驱动的仓库级 Code Agent。系统计划接收代�
 - 提供 `search_text`、`read_code`、`apply_patch`、`git_diff`、`run_tests` 和 `run_command` 结构化工具。
 - 使用 Pydantic 严格校验工具参数，并将参数错误、权限拒绝、非零退出和超时转换成结构化观察。
 - 为每次运行创建唯一 run ID、manifest、轨迹和 artifact 目录。
+- 使用可脚本化 FakeModel 驱动线性 Agent；工具反馈、预算消耗和最终决定写入可回放轨迹。
+- 只有最新修改经过公开测试且最终 diff 非空时才保存 `final.patch`；评测私有引用不传给模型。
 - 提供基础单元测试和确定性的 fake 对象测试入口。
 
 ## 环境要求
@@ -52,6 +54,7 @@ python -m ruff check .
 docker version
 docker build -t patchflow-runtime:py311 .
 PATCHFLOW_RUN_DOCKER_TESTS=1 python -m pytest -q tests/test_docker_integration.py
+PATCHFLOW_RUN_DOCKER_TESTS=1 python -m pytest -q tests/test_linear_agent.py
 ```
 
 镜像构建需要联网下载基础镜像和 Python 依赖；任务运行默认 `--network none`。`.dockerignore` 只允许包代码与必要元数据进入构建上下文。WSL2 + Docker Desktop 环境已通过真实容器集成测试，包括工具闭环、超时清理、任务隔离和大输出截断；每次更改后仍应重新运行测试。
@@ -64,7 +67,8 @@ PATCHFLOW_RUN_DOCKER_TESTS=1 python -m pytest -q tests/test_docker_integration.p
 
 ## 当前边界
 
-- 当前版本不会调用 LLM 或 SWE-bench，因此不需要配置模型 API key。
+- 当前版本只提供 FakeModel，不调用真实 LLM 或 SWE-bench，因此不需要配置模型 API key。
+- FakeModel 的测试通过只证明编排和安全边界符合预期，不代表模型有真实修复能力或隐藏测试通过。
 - `LocalRuntime` 共享宿主机内核、网络和当前用户权限，只适合可信代码与开发测试。
 - 不要把自己的工作仓库直接交给 `LocalRuntime`；应把任务复制到专用隔离根的子目录，并确保启动前 Git 工作区完全干净。
 - DockerRuntime 已完成基础集成验收，但它不是通用安全边界的证明；正式执行未知仓库、SWE-bench 或模型生成的高风险命令前仍需按部署环境进行风险审查。

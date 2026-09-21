@@ -367,6 +367,10 @@ class LocalRuntime:  # 定义本地隔离运行时。
             termination_reason = "timeout"  # 保存稳定终止原因。
             await self._terminate_process_tree(process)  # 终止进程及其在 Linux 中创建的子进程组。
             stdout_bytes, stderr_bytes = await communication  # 回收终止前已经产生的全部输出。
+        except asyncio.CancelledError:  # Agent 的全局墙钟超时可能取消当前命令。
+            await self._terminate_process_tree(process)  # 在传播取消前回收进程树。
+            await communication  # 等待管道排空，避免后台任务泄漏。
+            raise  # 保留外层超时或用户取消的语义。
         elapsed = time.perf_counter() - started_at  # 计算命令完整墙钟耗时。
         stdout_text = stdout_bytes.decode("utf-8", errors="replace")  # 容错解码标准输出。
         stderr_text = stderr_bytes.decode("utf-8", errors="replace")  # 容错解码错误输出。

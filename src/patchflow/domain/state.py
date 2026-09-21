@@ -49,7 +49,8 @@ class BudgetUsage:
 
 # 这里只约束高层流程；每个阶段内部的细粒度行为将在 Agent 模块中实现。
 _ALLOWED_PHASE_TRANSITIONS: dict[AgentPhase, frozenset[AgentPhase]] = {
-    AgentPhase.CREATED: frozenset({AgentPhase.INITIALIZE, AgentPhase.CANCELLED}),
+    AgentPhase.CREATED: frozenset({AgentPhase.INITIALIZE, AgentPhase.LINEAR_REACT, AgentPhase.CANCELLED}),  # 新基线可直接从初始阶段进入线性循环。
+    AgentPhase.LINEAR_REACT: frozenset({AgentPhase.COMPLETED, AgentPhase.FAILED, AgentPhase.CANCELLED}),  # 基线只保留一个显式阶段。
     AgentPhase.INITIALIZE: frozenset(
         {AgentPhase.UNDERSTAND, AgentPhase.FAILED, AgentPhase.CANCELLED}
     ),
@@ -137,4 +138,3 @@ class AgentState:
             AgentPhase.FAILED,
             AgentPhase.CANCELLED,
         }
-
