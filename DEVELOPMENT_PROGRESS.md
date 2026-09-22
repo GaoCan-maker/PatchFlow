@@ -316,3 +316,52 @@ Step 2A 当时的自动验证结果（后续全量结果见 Step 2C）：
 - 在 WSL `patchflow` 环境使用假密钥构造 `ModelConfig` 与 `OpenAIChatModel`，离线装配检查通过；没有发送真实 API 请求。
 - 已在 README 增加准确的 `PATCHFLOW_MODEL_API_KEY` 设置方式、离线验证、显式付费的 One-shot 小规模试跑和兼容性限制。
 - 待用户在本地 WSL 终端自行设置真实密钥、核对可用模型和限额后，才能进行收费的真实联调；不要把密钥发到聊天或提交到 Git。
+
+## 9. 第四周：仓库索引与 Hybrid Localization（2026-09-22）
+
+### 本次完成
+
+- [x] 新增 `src/patchflow/localization.py`：Git 已跟踪 Python 文件仓库地图、AST 类/函数/方法索引、静态导入和调用名称、受限局部内容索引。
+- [x] 索引建立要求干净基础提交；资源上限、文件跳过记录、Git 枚举截断拒绝、可选基础提交 JSON 缓存均已实现。缓存键包含仓库位置、基础提交、适配器版本和配置。
+- [x] 实现 Issue、源码搜索、traceback、失败测试导入关系和符号五类可开关证据；文件与符号分别输出 Top-K、原始特征、加权贡献和具体依据。普通修复任务中测试文件的轻度负向先验也是显式贡献。
+- [x] 新增 `repo_map`/`find_symbol` 两个只读工具，复用基础提交索引；对参数、分页和实际结构化输出字符数执行限制，不改变第三周 baseline 工具集合。
+- [x] 新增 `src/patchflow/evaluation/localization.py` 与 `src/patchflow/localization_cli.py`：金标与 Agent 输入分离，Docker 中独立计算文件/符号 Top-K 与 MRR，并进行五组留一消融。
+- [x] 新增 `docs/week4_localization.md`、两题烟测金标和 ADR 0008，写清运行方式、阅读顺序、安全边界和局限。
+- [x] 新增本地索引/排名边界测试、只读工具契约测试及需显式开启的 Docker 端到端测试；AST 降级、输出截断、缓存、脏工作区拒绝均有覆盖。
+
+### 验收结果
+
+- 第四周新增离线与 Docker 测试：`9 passed`；新增文件 Ruff：`All checks passed!`。
+- 最终完整回归：`PATCHFLOW_RUN_DOCKER_TESTS=1 python -m pytest -q`，`78 passed in 30.77s`。
+- 离线 CLI 实跑两题烟测：完整配置文件 Top-1=2/2、函数 Top-1=2/2；六组排名指标目前相同。该样本只验证流水线，不能当作定位泛化效果或通道无用的证据；原始贡献和报告已保留供分析。
+- 本次没有调用付费模型、读取或暴露 AGICTO API key；不需要注册新 API。运行离线 Docker 评测需要已有 `patchflow-runtime:py311` 镜像和 WSL/Docker Desktop 集成。
+
+### 下一步
+
+1. 第五周把 `RepoIndex` 和 `LocalizationResult` 接入显式 `LOCATE` 状态与 Evidence Graph，而不是改变第三周 baseline 的信息预算。
+2. 为定位评测加入多文件干扰、修复前真实失败栈帧、人工审查的文件与函数金标，扩大 MicroSWE 开发集后再解读消融；候选补丁后更新索引也需单独设计。
+3. 真实模型联调仍由用户在 WSL 自行设置环境变量并显式确认费用，本周无此依赖。
+
+## 10. 第五周：显式状态机与 Evidence Graph（2026-09-22）
+
+### 本次完成
+
+- [x] 独立 `PatchFlowAgent` 执行 INITIALIZE、UNDERSTAND、REPRODUCE、LOCALIZE、PLAN、GENERATE_CANDIDATES、VERIFY_CANDIDATES、REFLECT 和 SELECT_AND_FINALIZE，所有迁移走 `AgentState.transition_to()`；不改变第三周 baseline。
+- [x] 用第四周 `RepoIndex` 与 `localize()` 生成文件/符号证据；模型的理解、计划、补丁、反思分别经严格 Pydantic JSON 协议校验。单文件计划必须匹配实际补丁修改文件。
+- [x] `EvidenceGraph` 支持设计文档中的节点/关系、来源与因果引用、假设状态、重复补丁检测、候选验证身份校验、原子 JSON 快照；执行事实与模型推断明确分离。
+- [x] 分区 `EvidenceContextBuilder` 固定保留 Issue、最近失败、当前修改、主假设和被反驳方案；可选代码和近期证据按可信度、相关性、新鲜度、字节成本选择，并记录选择/丢弃。
+- [x] 失败测试可驱动 REFLECT 回跳 LOCALIZE、PLAN 或 GENERATE；真实验证失败才允许反驳假设，失败后的下一轮上下文保留反证。相同补丁不重复应用，公开测试污染工作区时不导出最终补丁。
+- [x] 新增独立 `python -m patchflow.agent_cli` 单任务入口，强制 Docker 与 `--allow-api-spend`；文档与 ADR 0009 说明阶段、JSON 协议、真实付费边界和第六周限制。
+
+### 验收结果
+
+- 全量回归：`PATCHFLOW_RUN_DOCKER_TESTS=1 python -m pytest -q`，`93 passed in 75.01s`；第五周新增文件 Ruff：`All checks passed!`。
+- 新增测试覆盖成功路径、失败后重计划/重定位、重复补丁、错误自证、跨候选验证拒绝、上下文保留与压缩、模型预算、公开测试副作用、CLI 付费门槛和真实 Docker 隔离。
+- 首次并行运行新增 Docker 测试时容器在 INITIALIZE 阶段出现一次 `WorkspaceSafetyError`，未进入模型/索引；随后直接启动同一临时仓库成功、单独重跑集成测试通过，全量回归也通过。保留为环境瞬时故障记录，不计作策略修复失败。
+- 全部验收使用 FakeModel，没有调用 AGICTO 或其他付费 API，也没有读取真实 API key；现有 WSL + Docker 镜像即可运行离线验收，不需注册新服务。
+
+### 下一步
+
+1. 第六周为每个候选创建独立可变工作区，支持受限并发、候选去重、验证金字塔和明确的选择策略。
+2. 扩充多文件 MicroSWE 任务与人工金标，固定预算比较 baseline、Hybrid Localization 和 Evidence Graph 的真实模型结果；此前不能将两题烟测当成能力结论。
+3. 如需真实模型联调，由用户自行在 WSL 设置 `PATCHFLOW_MODEL_API_KEY` 或 `OPENAI_API_KEY`，确认模型 ID、严格 JSON 兼容性和费用后显式运行主策略入口；不要把密钥提交或发到聊天。

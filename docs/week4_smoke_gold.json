@@ -1,0 +1,12 @@
+{
+  "micro-greet-strip": {
+    "file": "app.py",
+    "symbol": "greet",
+    "failing_tests": ["test_trim"]
+  },
+  "micro-parse-empty": {
+    "file": "app.py",
+    "symbol": "parse_items",
+    "failing_tests": ["test_empty"]
+  }
+}

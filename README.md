@@ -149,3 +149,7 @@ python -m patchflow.cli run-batch /tmp/patchflow-smoke/tasks.json --provider ope
 - `LocalRuntime` 共享宿主机内核、网络和当前用户权限，只适合可信代码与开发测试。
 - 不要把自己的工作仓库直接交给 `LocalRuntime`；应把任务复制到专用隔离根的子目录，并确保启动前 Git 工作区完全干净。
 - DockerRuntime 已完成基础集成验收，但它不是通用安全边界的证明；正式执行未知仓库、SWE-bench 或模型生成的高风险命令前仍需按部署环境进行风险审查。
+
+## 第五周主策略
+
+已新增独立的 `PatchFlowAgent`：显式阶段状态机、可溯源 Evidence Graph、有界分区上下文及失败后的结构化反思。它不修改第三周三条 baseline。离线 FakeModel 和真实 Docker 集成测试均不需要 API key；真实单任务入口 `python -m patchflow.agent_cli` 必须显式提供 `--allow-api-spend`，并自行设置模型服务密钥。运行方法、代码阅读顺序和单候选限制见 `docs/week5_state_machine.md`。
