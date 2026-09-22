@@ -24,6 +24,7 @@ class AgentPhase(StrEnum):
 
     CREATED = "created"
     LINEAR_REACT = "linear_react"  # 线性基线直接循环工具与模型，不假装进入完整策略的阶段。
+    ONE_SHOT = "one_shot"  # 单轮基线只生成补丁，不在生成阶段接收测试反馈。
     INITIALIZE = "initialize"
     UNDERSTAND = "understand"
     REPRODUCE = "reproduce"

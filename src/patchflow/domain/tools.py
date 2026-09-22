@@ -22,6 +22,7 @@ class ToolSpec(BaseModel):
     read_only: bool
     default_timeout_seconds: float = Field(default=30.0, gt=0)
     max_output_chars: int = Field(default=20_000, ge=1)
+    parameters_schema: dict[str, JsonValue] = Field(default_factory=dict)  # 向真实模型暴露严格工具参数 JSON Schema。
 
 
 class ToolCall(BaseModel):
@@ -59,4 +60,3 @@ class Tool(Protocol):
 
     async def execute(self, call: ToolCall, runtime: Runtime) -> ToolResult:
         """在显式 Runtime 中执行工具，禁止绕过 Runtime 访问宿主机。"""
-

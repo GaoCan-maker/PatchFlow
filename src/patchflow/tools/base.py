@@ -39,7 +39,7 @@ class ValidatedTool(ABC, Generic[ArgumentsT]):  # 定义带统一校验和错误
     """把参数错误与 Runtime 错误统一转换为 ToolResult。"""  # 说明基类职责。
 
     def __init__(self, spec: ToolSpec, arguments_model: type[ArgumentsT]) -> None:  # 定义工具元数据构造函数。
-        self._spec = spec  # 保存不可变工具声明。
+        self._spec = spec.model_copy(update={"parameters_schema": arguments_model.model_json_schema()})  # 从同一个 Pydantic 模型生成模型可见参数模式。
         self._arguments_model = arguments_model  # 保存对应的 Pydantic 参数模型类型。
 
     @property  # 按 Tool 协议暴露只读元数据。
@@ -116,4 +116,3 @@ class ValidatedTool(ABC, Generic[ArgumentsT]):  # 定义带统一校验和错误
             elapsed_seconds=time.perf_counter() - started_at,  # 计算包含校验在内的工具总耗时。
             truncated=outcome.truncated,  # 复制输出截断标志。
         )  # 完成统一工具结果。
-

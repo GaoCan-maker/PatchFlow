@@ -16,7 +16,13 @@ dependencies = [
     "pydantic>=2.10,<3.0",
 ]
 
+[project.scripts] # 暴露可直接运行的实验 CLI。
+patchflow = "patchflow.cli:main" # 将命令行入口绑定到主函数。
+
 [project.optional-dependencies]
+model-openai = [ # 真实模型适配器使用的可选依赖组。
+    "openai>=3.16,<4", # 锁定已离线验收的 SDK 主版本范围。
+] # 结束可选模型依赖列表。
 dev = [
     "pytest>=8.3,<9.0",
     "pytest-cov>=5.0,<7.0",

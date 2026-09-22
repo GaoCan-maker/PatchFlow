@@ -12,6 +12,8 @@ from patchflow.domain.tools import ToolCall, ToolSpec  # 复用现有工具调�
 class ModelMessage:  # 定义线性上下文的一条消息。
     role: str  # 标识 system、assistant 或 tool 等消息来源。
     content: str  # 保存该来源的可见文本内容。
+    tool_call: ToolCall | None = None  # 助手消息可携带原始结构化函数调用。
+    tool_call_id: str | None = None  # 工具消息保留与函数调用配对的原始 ID。
 
 
 @dataclass(frozen=True, slots=True)  # 保证输入历史不会被模型适配器修改。
@@ -26,10 +28,11 @@ class ModelRequest:  # 定义模型完成一次 Agent 决策所需的输入。
 class ModelUsage:  # 定义 provider 应报告的资源用量。
     input_tokens: int = 0  # 保存输入 token 数；FakeModel 可返回零。
     output_tokens: int = 0  # 保存输出 token 数；真实适配器需填写实际值。
-    cost_usd: float = 0.0  # 保存本次请求的美元成本估计。
+    cost_usd: float | None = None  # 未配置价格时保持未知，不能伪装成零成本。
+    cached_input_tokens: int = 0  # 保存 provider 报告的缓存输入 token 数。
 
     def __post_init__(self) -> None:  # 防止错误计量污染全局预算。
-        if self.input_tokens < 0 or self.output_tokens < 0 or self.cost_usd < 0:  # 检查所有用量均非负。
+        if self.input_tokens < 0 or self.output_tokens < 0 or self.cached_input_tokens < 0 or (self.cost_usd is not None and self.cost_usd < 0):  # 检查所有已知用量均非负。
             raise ValueError("模型用量不能为负数")  # 明确拒绝无效 provider 回复。
 
 

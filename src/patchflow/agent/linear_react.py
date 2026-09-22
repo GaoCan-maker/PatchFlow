@@ -9,6 +9,7 @@ from dataclasses import dataclass  # 保存不可变运行结果。
 from datetime import UTC, datetime  # 保存 manifest 生命周期时间并统一使用 UTC。
 from typing import Any  # 标注事件中的 JSON 兼容负载。
 
+from patchflow.agent.context import ContextBuilder, ContextTooLargeError  # 限制模型可见历史大小。
 from patchflow.application.run_initializer import RunContext  # 复用运行目录和事件流。
 from patchflow.domain.enums import (  # 复用状态与事件枚举。
     AgentPhase,  # 描述 Agent 当前阶段。
@@ -20,6 +21,10 @@ from patchflow.domain.events import AgentEvent  # 构造追加式轨迹事件。
 from patchflow.domain.runtime import Runtime  # 限定所有仓库操作通过运行时协议。
 from patchflow.domain.task import TaskSpec  # 读取任务问题与预算。
 from patchflow.domain.tools import Tool, ToolCall, ToolResult  # 复用受校验工具契约。
+from patchflow.model.errors import (  # 区分模型服务错误与无效结构化回复。
+    ModelOutputError,  # 识别无效模型动作。
+    ModelProviderError,  # 识别远程服务故障。
+)  # 结束模型错误导入。
 from patchflow.model.protocol import (  # 依赖 provider 无关模型协议。
     Model,  # 声明异步模型最小接口。
     ModelMessage,  # 构造可见线性历史。
@@ -36,8 +41,9 @@ class AgentOutcome:  # 返回模型与运行时协作产生的最终结论。
 
 
 class LinearReactAgent:  # 实现没有候选分支和显式修复阶段的基线。
-    def __init__(self, model: Model, tools: tuple[Tool, ...]) -> None:  # 注入模型和显式允许的工具。
+    def __init__(self, model: Model, tools: tuple[Tool, ...], *, context_builder: ContextBuilder | None = None) -> None:  # 注入模型、工具与上下文策略。
         self._model = model  # 保留异步模型协议实例。
+        self._context_builder = context_builder or ContextBuilder()  # 默认限制单次请求的估算字节数。
         self._tools = {tool.spec.name: tool for tool in tools}  # 使用稳定名称构造分发表。
         if len(self._tools) != len(tools):  # 阻止重复名称产生不确定路由。
             raise ValueError("工具名称不能重复")  # 让装配错误尽早暴露。
@@ -63,6 +69,12 @@ class LinearReactAgent:  # 实现没有候选分支和显式修复阶段的基�
             outcome = await asyncio.wait_for(self._drive(), timeout=task.budget.max_wall_clock_seconds)  # 对整个任务施加硬时限。
         except TimeoutError:  # 全局时间预算耗尽时得到可解释结果。
             outcome = AgentOutcome(RunStatus.FAILED, "wall_clock_seconds", None)  # 不输出未验证补丁。
+        except ModelProviderError as error:  # 将网络和服务错误与修复失败分开统计。
+            outcome = AgentOutcome(RunStatus.INFRASTRUCTURE_ERROR, f"model_{error.kind}", None)  # 保留不含密钥的错误分类。
+        except ModelOutputError:  # 模型产生无效结构化动作时不能继续执行。
+            outcome = AgentOutcome(RunStatus.FAILED, "invalid_model_output", None)  # 避免把模型错误归为基础设施故障。
+        except ContextTooLargeError:  # 固定区或最新完整反馈无法容纳时安全停止。
+            outcome = AgentOutcome(RunStatus.FAILED, "context_limit", None)  # 不发送被截断的补丁或工具结果。
         except Exception as error:  # 将模型或环境异常记录为可审计基础设施错误。
             outcome = AgentOutcome(RunStatus.INFRASTRUCTURE_ERROR, type(error).__name__, None)  # 避免将异常误计作修复失败。
         finally:  # 无论结果如何都关闭运行时并更新清单。
@@ -73,8 +85,8 @@ class LinearReactAgent:  # 实现没有候选分支和显式修复阶段的基�
             context.state.usage.wall_clock_seconds = time.perf_counter() - self._started_at  # 记录真实总耗时。
             context.state.status = outcome.status  # 将结果反映在内存状态中。
             context.state.stop_reason = outcome.stop_reason  # 保存可供调用方读取的停止原因。
-            terminal_phase = AgentPhase.COMPLETED if outcome.status is RunStatus.SUCCEEDED else AgentPhase.FAILED  # 选择基线终态。
-            if context.state.phase is AgentPhase.LINEAR_REACT:  # 仅在成功进入基线阶段后迁移。
+            terminal_phase = AgentPhase.COMPLETED if outcome.status in {RunStatus.SUCCEEDED, RunStatus.PATCH_GENERATED} else AgentPhase.FAILED  # 区分有效候选与失败。
+            if context.state.phase in {AgentPhase.LINEAR_REACT, AgentPhase.ONE_SHOT}:  # 仅在成功进入基线阶段后迁移。
                 context.state.transition_to(terminal_phase)  # 使用现有状态迁移校验。
             if outcome.patch is not None:  # 只有已验证的成功结果才生成最终文件。
                 context.layout.final_patch_path.write_text(outcome.patch, encoding="utf-8")  # 保存可应用的完整 patch。
@@ -83,7 +95,7 @@ class LinearReactAgent:  # 实现没有候选分支和显式修复阶段的基�
             context.manifest.stop_reason = outcome.stop_reason  # 保存机器可读停止原因。
             context.manifest.finished_at = datetime.now(UTC)  # 保存终止时间。
             ManifestStore(context.layout.manifest_path).save(context.manifest)  # 原子持久化最终清单。
-            event_type = EventType.RUN_COMPLETED if outcome.status is RunStatus.SUCCEEDED else EventType.RUN_FAILED  # 选择终止事件类型。
+            event_type = EventType.RUN_COMPLETED if outcome.status in {RunStatus.SUCCEEDED, RunStatus.PATCH_GENERATED} else EventType.RUN_FAILED  # 选择终止事件类型。
             self._record(event_type, EventActor.AGENT, {"status": outcome.status.value, "reason": outcome.stop_reason})  # 记录最终决定。
         return outcome  # 返回与磁盘清单一致的最终结果。
 
@@ -99,18 +111,25 @@ class LinearReactAgent:  # 实现没有候选分支和显式修复阶段的基�
             reached = tuple(name for name in usage.exceeded_items(self._task.budget) if name != "tool_calls")  # 工具次数单独在调度前检查。
             if reached:  # 模型、步数、token、命令耗时或成本已到上限。
                 return AgentOutcome(RunStatus.FAILED, reached[0], None)  # 停止后续模型请求。
-            request = ModelRequest(self._task.task_id, self._task.problem_statement, tuple(self._history), tuple(tool.spec for tool in self._tools.values()))  # 仅发送 Agent 可见任务数据。
-            self._record(EventType.MODEL_REQUESTED, EventActor.AGENT, {"history_length": len(request.history)})  # 记录请求边界。
+            tool_specs = tuple(tool.spec for tool in self._tools.values())  # 获取本轮可调用工具模式。
+            context_slice = self._context_builder.build(tuple(self._history), tool_specs)  # 保留最新完整工具反馈并压缩较旧历史。
+            if context_slice.dropped_messages:  # 只在真实发生压缩时记录事件。
+                self._record(EventType.CONTEXT_COMPACTED, EventActor.AGENT, {"dropped_messages": context_slice.dropped_messages, "estimated_bytes": context_slice.estimated_bytes})  # 保留压缩审计数据。
+            request = ModelRequest(self._task.task_id, self._task.problem_statement, context_slice.messages, tool_specs)  # 仅发送 Agent 可见任务数据。
+            self._record(EventType.MODEL_REQUESTED, EventActor.AGENT, {"history_length": len(request.history), "estimated_bytes": context_slice.estimated_bytes})  # 记录请求边界。
             response = await self._model.complete(request)  # 从 FakeModel 或真实适配器取得下一步。
             usage.model_calls += 1  # 每次成功回复消耗一次模型调用。
             usage.agent_steps += 1  # 每次模型决策消耗一个 Agent 步骤。
             usage.input_tokens += response.usage.input_tokens  # 累加 provider 报告的输入 token。
             usage.output_tokens += response.usage.output_tokens  # 累加 provider 报告的输出 token。
-            usage.cost_usd += response.usage.cost_usd  # 累加 provider 报告的成本。
-            self._record(EventType.MODEL_RESPONDED, EventActor.MODEL, {"tool": response.tool_call.tool_name if response.tool_call else None, "final": response.final_answer, "input_tokens": response.usage.input_tokens, "output_tokens": response.usage.output_tokens})  # 保存决策与用量。
+            if response.usage.cost_usd is not None:  # 只累加能够可靠估算的模型成本。
+                usage.cost_usd += response.usage.cost_usd  # 累加 provider 报告的已知成本。
+            self._record(EventType.MODEL_RESPONDED, EventActor.MODEL, {"tool": response.tool_call.tool_name if response.tool_call else None, "final": response.final_answer, "input_tokens": response.usage.input_tokens, "output_tokens": response.usage.output_tokens, "cached_input_tokens": response.usage.cached_input_tokens, "cost_usd": response.usage.cost_usd})  # 保存决策与用量。
             budget = self._task.budget  # 读取本次任务的硬限制。
             if usage.input_tokens > budget.max_input_tokens or usage.output_tokens > budget.max_output_tokens:  # 阻止超量回复继续调用工具。
                 return AgentOutcome(RunStatus.FAILED, "token_budget", None)  # 保留超支事实供轨迹分析。
+            if budget.max_cost_usd is not None and response.usage.cost_usd is None:  # 有成本上限时必须得到可计价用量。
+                return AgentOutcome(RunStatus.FAILED, "unpriced_model_usage", None)  # 拒绝把未知成本当作零成本。
             if budget.max_cost_usd is not None and usage.cost_usd > budget.max_cost_usd:  # 检查可选花费上限。
                 return AgentOutcome(RunStatus.FAILED, "cost_usd", None)  # 停止一切进一步动作。
             if response.final_answer is not None:  # 模型决定结束当前线性轨迹。
@@ -133,15 +152,18 @@ class LinearReactAgent:  # 实现没有候选分支和显式修复阶段的基�
             tool = self._tools.get(call.tool_name)  # 获取实际注册工具的权限声明。
             if tool is not None and not tool.spec.read_only:  # 任何当前或未来的写工具都使旧测试失效。
                 self._verified = False  # 要求模型再次测试最新工作区。
-            if call.tool_name == "run_tests":  # 测试反馈决定当前候选是否通过。
+            if self._is_verification_call(call, result):  # 仅公开测试命令可验证最新候选。
                 self._verified = result.success  # 非零退出、超时与参数错误都不能通过验证。
             if not result.success:  # 保存最近失败原因供状态分析。
                 self._context.state.last_failure = result.summary  # 更新 Agent 当前可恢复视图。
             self._record(EventType.TOOL_COMPLETED, EventActor.TOOL, {"call_id": result.call_id, "success": result.success, "error_type": result.error_type, "summary": result.summary, "data": result.data, "truncated": result.truncated})  # 记录完整结构化观察。
             observation = json.dumps({"call_id": result.call_id, "success": result.success, "summary": result.summary, "error_type": result.error_type, "data": result.data, "truncated": result.truncated}, ensure_ascii=False, default=str)  # 构造下一轮模型可见反馈。
-            self._history.append(ModelMessage("assistant", f"调用 {call.tool_name}: {call.arguments}"))  # 保存产生观察的动作。
-            self._history.append(ModelMessage("tool", observation))  # 保留成功或失败工具反馈。
+            self._history.append(ModelMessage("assistant", "", tool_call=call))  # 按原始 ID 保存助手函数调用供 API 回放。
+            self._history.append(ModelMessage("tool", observation, tool_call_id=call.call_id))  # 将工具反馈绑定至对应函数调用。
             self._record(EventType.BUDGET_UPDATED, EventActor.AGENT, {"steps": usage.agent_steps, "model_calls": usage.model_calls, "tool_calls": usage.tool_calls, "command_seconds": usage.command_seconds})  # 记录本轮累计资源。
+
+    def _is_verification_call(self, call: ToolCall, result: ToolResult) -> bool:  # 供受控策略定义其公开测试动作。
+        return call.tool_name == "run_tests"  # 线性基线仅接受专用测试工具的结果。
 
     async def _invoke(self, call: ToolCall) -> ToolResult:  # 将模型调用映射到已注册工具。
         if call.call_id in self._call_ids:  # 检查轨迹内调用 ID 唯一性。
