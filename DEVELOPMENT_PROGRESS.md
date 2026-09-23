@@ -365,3 +365,31 @@ Step 2A 当时的自动验证结果（后续全量结果见 Step 2C）：
 1. 第六周为每个候选创建独立可变工作区，支持受限并发、候选去重、验证金字塔和明确的选择策略。
 2. 扩充多文件 MicroSWE 任务与人工金标，固定预算比较 baseline、Hybrid Localization 和 Evidence Graph 的真实模型结果；此前不能将两题烟测当成能力结论。
 3. 如需真实模型联调，由用户自行在 WSL 设置 `PATCHFLOW_MODEL_API_KEY` 或 `OPENAI_API_KEY`，确认模型 ID、严格 JSON 兼容性和费用后显式运行主策略入口；不要把密钥提交或发到聊天。
+
+## 11. 第六周：候选分支与验证金字塔（2026-09-22）
+
+### 本次完成
+
+- [x] 新增 `src/patchflow/candidates/workspaces.py`：验证源仓库位于干净 `base_commit`，通过 `git clone --local --no-hardlinks` 为每个候选创建独立可变副本，限制候选目录在显式隔离根内，并在结束时统一清理。
+- [x] 新增 `src/patchflow/candidates/branching.py`：规范化补丁摘要去重，限制候选数量和同时验证数量，为每个候选创建独立 Runtime，并保存候选级报告。
+- [x] 新增 `src/patchflow/verification/pyramid.py`：实现 V0 补丁应用、V1 Python 语法、V2 静态检查、V3 最小复现、V4 目标测试和 V5 回归测试；任何硬失败都会提前淘汰候选。
+- [x] 验证候选测试结束后的真实 Git diff；测试修改工作区时拒绝候选，避免测试副作用混入最终补丁。
+- [x] 候选选择先过滤未完整验证的候选，再按照修改文件数、验证耗时和稳定候选 ID 排序；无合格候选时返回空选择，不把“最不差候选”报告为成功。
+- [x] 新增 `docs/week6_candidate_branching.md` 和 ADR 0010，记录独立副本、Runtime 工厂、验证层级、并发边界和未来重新评估条件。
+- [x] 新增第六周离线测试，覆盖语法失败候选淘汰、有效候选选择、重复补丁去重和全失败时拒绝选择。
+
+### 验收结果
+
+- 非 Docker 全量回归：`python -m pytest -q`，`88 passed, 10 skipped in 11.57s`；新增文件 Ruff：`All checks passed!`。
+- 第六周本地候选测试：`3 passed in 1.22s`；第五周主策略接入第六周多候选端到端测试包含在定向回归中，定向结果为 `23 passed, 1 skipped in 7.15s`。
+- 第六周 Docker 候选并发测试：`PATCHFLOW_RUN_DOCKER_TESTS=1 python -m pytest -q tests/test_week6_docker_integration.py`，最终重跑 `1 passed in 2.50s`。
+- 原有 Docker Runtime 集成测试单独重跑：`PATCHFLOW_RUN_DOCKER_TESTS=1 python -m pytest -q tests/test_docker_integration.py`，`3 passed in 5.48s`。
+- 全量 Docker 回归曾在连续容器启动期间出现 `9 failed, 87 passed in 812.20s`；失败全部发生在已有 `DockerRuntime.start()` 容器启动阶段，单独重跑原有 Docker 测试及第六周 Docker 测试均通过，记录为全量资源瞬态，不计作第六周候选逻辑失败。
+- 所有第六周测试使用临时 Git 仓库和 Fake 任务，不读取 API key，不调用付费模型。
+- 第六周模块已接入 `PatchFlowAgent`：`max_candidates_per_round=1` 保持第五周路径，设置为 2 到 4 时模型多次生成 `PatchProposal`，候选在独立 Runtime 中验证并由主策略输出真实选中 diff。
+
+### 下一步
+
+1. 将第五周 `PatchFlowAgent` 的多次结构化 `PatchProposal` 生成接入 `CandidateBranchingEngine`。
+2. 为 DockerRuntime 增加候选级并发集成测试，并依据宿主资源设置候选、容器和测试并发上限。
+3. 进入第七周 SWE-bench Adapter，分离 inference harness 与官方 evaluation harness。

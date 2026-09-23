@@ -153,3 +153,7 @@ python -m patchflow.cli run-batch /tmp/patchflow-smoke/tasks.json --provider ope
 ## 第五周主策略
 
 已新增独立的 `PatchFlowAgent`：显式阶段状态机、可溯源 Evidence Graph、有界分区上下文及失败后的结构化反思。它不修改第三周三条 baseline。离线 FakeModel 和真实 Docker 集成测试均不需要 API key；真实单任务入口 `python -m patchflow.agent_cli` 必须显式提供 `--allow-api-spend`，并自行设置模型服务密钥。运行方法、代码阅读顺序和单候选限制见 `docs/week5_state_machine.md`。
+
+## 第六周候选分支
+
+已新增并接入候选分支与验证金字塔模块：候选从同一 `base_commit` 创建独立 Git 副本，按规范化补丁摘要去重，在受限并发下运行 V0 到 V5 验证层级，并使用硬约束优先的确定性规则选择候选。`max_candidates_per_round=1` 保留第五周单候选路径，设置为 2 到 4 时主策略会生成多个结构化补丁并验证真实 diff；第六周模块的运行方式和阅读顺序见 `docs/week6_candidate_branching.md`。

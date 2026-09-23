@@ -23,6 +23,12 @@ from patchflow.agent.decisions import (  # 导入四个阶段的严格决策模�
 )  # 完成阶段输出协议导入。
 from patchflow.agent.linear_react import AgentOutcome  # 与现有评测返回值保持一致。
 from patchflow.application.run_initializer import RunContext  # 使用现有 manifest、事件与 artifact。
+from patchflow.candidates.branching import (  # 接入第六周独立候选编排器。
+    BranchingConfig,  # 配置候选宽度和验证并发。
+    CandidateBranchingEngine,  # 创建、验证和选择候选。
+    RuntimeFactory,  # 标注候选 Runtime 工厂协议。
+)  # 完成候选编排器导入。
+from patchflow.candidates.workspaces import patch_digest  # 对候选统一规范化去重。
 from patchflow.config.models import AgentConfig  # 读取最大反思轮次配置。
 from patchflow.domain.enums import (  # 使用正式状态与事件枚举。
     AgentPhase,  # 控制合法修复阶段迁移。
@@ -49,6 +55,11 @@ from patchflow.memory.evidence import (  # 区分观测事实、推断和验证�
 from patchflow.model.errors import ModelOutputError, ModelProviderError  # 分类模型错误。
 from patchflow.model.protocol import Model, ModelRequest  # 使用 provider 无关模型接口。
 from patchflow.storage.manifest_store import ManifestStore  # 原子保存任务清单。
+from patchflow.verification.pyramid import (  # 接入有目标文件约束的验证金字塔。
+    VerificationLevel,  # 记录语法和行为验证层级。
+    VerificationPlan,  # 保存当前候选的测试命令计划。
+    VerificationPyramid,  # 执行从低成本到高成本的验证。
+)  # 完成验证金字塔导入。
 
 DecisionT = TypeVar("DecisionT", IssueUnderstanding, RepairPlan, PatchProposal, ReflectionDecision)  # 声明四类结构化模型回复。
 _FAILED_TEST = re.compile(r"(?:FAILED|ERROR)\s+([^\s]+::[^\s]+)")  # 提取 pytest 修复前或候选后的失败测试标识。
@@ -68,12 +79,14 @@ class RuntimeEnvironmentFailure(Exception):  # 区分测试环境未启动与代
 
 
 class PatchFlowAgent:  # 与第三周线性基线并列的显式阶段主策略。
-    def __init__(self, model: Model, *, config: AgentConfig | None = None, context_builder: EvidenceContextBuilder | None = None) -> None:  # 注入模型、策略上限和上下文配额。
+    def __init__(self, model: Model, *, config: AgentConfig | None = None, context_builder: EvidenceContextBuilder | None = None, branch_runtime_factory: RuntimeFactory | None = None, branch_python_executable: str = "python") -> None:  # 注入模型、策略上限和候选 Runtime 工厂。
         self._model = model  # 保留 provider 无关模型实例。
         self._config = config or AgentConfig(strategy="patchflow")  # 默认选择第五周主策略配置。
-        if self._config.max_candidates_per_round != 1:  # 第六周之前不伪装成多候选搜索。
-            raise ValueError("第五周策略只支持每轮一个候选补丁")  # 明确单候选实现边界。
+        if self._config.max_candidates_per_round > 1 and branch_runtime_factory is None:  # 多候选需要明确的隔离 Runtime 创建方式。
+            raise ValueError("多候选策略必须提供独立 Runtime 工厂")  # 防止共用可变工作区。
         self._context_builder = context_builder or EvidenceContextBuilder()  # 构造结构化分区上下文。
+        self._branch_runtime_factory = branch_runtime_factory  # 保存每个候选独立使用的 Runtime 工厂。
+        self._branch_python_executable = branch_python_executable  # 保存候选语法检查所用解释器。
 
     def _record(self, event_type: EventType, actor: EventActor, payload: dict[str, object]) -> str:  # 追加带因果链的正式事件。
         event = AgentEvent(run_id=self._context.state.run_id, task_id=self._task.task_id, event_type=event_type, actor=actor, causation_event_id=self._last_event_id, payload=payload)  # 构造 JSON 可序列化事件。
@@ -311,6 +324,43 @@ class PatchFlowAgent:  # 与第三周线性基线并列的显式阶段主策略�
                 break  # 不浪费额外验证预算。
         return passed  # 仅在全部公开命令通过时返回真。
 
+    async def _drive_branches(self) -> AgentOutcome:  # 执行第六周多候选生成、隔离验证和确定性选择。
+        if self._branch_runtime_factory is None:  # 多候选必须有独立 Runtime 工厂。
+            raise StrategyStop("missing_branch_runtime_factory")  # 不允许退化为共享工作区。
+        if not self._task.public_commands:  # 没有公开目标测试不能声称候选通过。
+            raise StrategyStop("missing_public_commands")  # 保留明确的验证不足原因。
+        self._phase(AgentPhase.GENERATE_CANDIDATES)  # 进入第六周候选生成阶段。
+        patches: list[str] = []  # 保存本轮模型生成的补丁文本。
+        response_events: list[str] = []  # 保存每个候选模型回复的事件来源。
+        for _ in range(self._config.max_candidates_per_round):  # 按有限宽度请求多个候选。
+            decision, event_id = await self._ask(AgentPhase.GENERATE_CANDIDATES, "针对当前计划生成一个与其他候选尽量不同的标准 Git unified diff；只返回 patch 字段。", PatchProposal)  # 获取一个严格候选补丁。
+            patches.append(decision.patch)  # 保存模型补丁等待独立工作区验证。
+            response_events.append(event_id)  # 保存当前补丁的模型来源事件。
+        self._record(EventType.DECISION_RECORDED, EventActor.AGENT, {"phase": "generate_candidates", "requested": len(patches), "unique_digests": len({patch_digest(item) for item in patches})})  # 记录生成宽度和去重前后信息。
+        branch_root = self._context.layout.run_dir / "candidate_workspaces"  # 把候选副本限制在本次运行目录内。
+        branch_config = BranchingConfig(max_candidates=self._config.max_candidates_per_round, max_concurrency=self._config.candidate_concurrency)  # 使用配置限制候选资源。
+        engine = CandidateBranchingEngine(config=branch_config, pyramid=VerificationPyramid(command_timeout_seconds=min(300.0, self._task.budget.max_command_seconds)))  # 装配受限验证金字塔。
+        plan = VerificationPlan.from_task(self._task, python_executable=self._branch_python_executable, allowed_files=frozenset({self._planned_file}))  # 将单文件计划转换为候选验证约束。
+        self._phase(AgentPhase.VERIFY_CANDIDATES)  # 进入并发候选验证阶段。
+        results, selection = await engine.run(self._task, patches, isolation_root=branch_root, runtime_factory=self._branch_runtime_factory, plan=plan, report_path=self._context.layout.run_dir / "candidates" / "branching_report.json")  # 创建独立工作区并验证全部候选。
+        for index, result in enumerate(results):  # 将每个候选报告写回 Evidence Graph。
+            source_ref = f"event:{response_events[min(index, len(response_events) - 1)]}"  # 将结果绑定到对应模型回复事件。
+            attempt = self._graph.add_node(EvidenceKind.PATCH_ATTEMPT, f"第六周候选 {result.candidate_id}", EvidenceOrigin.MODEL, source_ref, metadata={"candidate_id": result.candidate_id, "digest": result.patch_digest})  # 保存候选补丁身份。
+            for step in result.verification.steps if result.verification else ():  # 遍历候选实际执行的验证步骤。
+                if step.level in {VerificationLevel.V4_TARGET, VerificationLevel.V5_REGRESSION} or step.level is VerificationLevel.V1_SYNTAX:  # 记录关键语法和行为验证。
+                    event_id = self._record(EventType.VERIFICATION_COMPLETED, EventActor.VERIFIER, {"candidate_id": result.candidate_id, "level": step.level.value, "passed": step.passed, "reason": step.reason})  # 为验证结果创建轨迹来源。
+                    verification = self._graph.add_node(EvidenceKind.VERIFICATION, f"{step.level.value}：{'通过' if step.passed else '失败'}；{step.reason}", EvidenceOrigin.VERIFICATION, f"event:{event_id}", metadata={"candidate_id": result.candidate_id, "passed": step.passed, "eligible_refutation": step.level in {VerificationLevel.V4_TARGET, VerificationLevel.V5_REGRESSION}})  # 保存候选级验证事实。
+                    self._graph.add_edge(attempt.node_id, verification.node_id, EvidenceRelation.VERIFIES, f"event:{event_id}")  # 保持补丁与验证的候选身份一致。
+        self._sync_graph()  # 在最终选择前保存所有候选证据。
+        if selection.selected_candidate_id is None:  # 没有候选满足硬验证约束。
+            return AgentOutcome(RunStatus.FAILED, selection.reason, None)  # 明确失败且不输出未验证补丁。
+        selected = next(item for item in results if item.candidate_id == selection.selected_candidate_id)  # 找到确定性选择的候选。
+        if not selected.verified_patch:  # 选择结果必须包含工作区导出的真实 diff。
+            raise StrategyStop("selected_candidate_missing_diff")  # 防止只保存模型原文。
+        self._phase(AgentPhase.SELECT_AND_FINALIZE)  # 进入正式最终选择阶段。
+        self._context.state.selected_candidate_id = selected.candidate_id  # 保存最终候选身份。
+        return AgentOutcome(RunStatus.SUCCEEDED, "candidate_selected", selected.verified_patch)  # 返回经过隔离验证的真实补丁。
+
     async def _reflect(self) -> ReflectionAction:  # 基于真实失败进行结构化阶段路由。
         self._phase(AgentPhase.REFLECT)  # 进入可回跳的反思阶段。
         decision, event_id = await self._ask(AgentPhase.REFLECT, "依据最近补丁拒绝或测试失败，指出被否定预期、新事实、失败类别和下一阶段；不能声称失败测试已确认假设；不要重复被反驳方案。", ReflectionDecision)  # 请求严格失败分析。
@@ -320,7 +370,7 @@ class PatchFlowAgent:  # 与第三周线性基线并列的显式阶段主策略�
             raise ModelOutputError("失败后不能把假设标记为已确认")  # 防止模型推断洗白为验证事实。
         if hypothesis_id is not None:  # 只更新确实存在的当前假设。
             status = decision.hypothesis_status  # 读取经过枚举校验的模型建议状态。
-            if status is HypothesisStatus.REFUTED and (latest_verification is None or latest_verification.metadata.get("candidate_id") != self._current_candidate_id or latest_verification.metadata.get("passed") is not False):  # 只有本候选的失败验证才可反驳根因。
+            if status is HypothesisStatus.REFUTED and (latest_verification is None or latest_verification.metadata.get("candidate_id") != self._current_candidate_id or latest_verification.metadata.get("passed") is not False or latest_verification.metadata.get("eligible_refutation", True) is False):  # 只有本候选的行为测试失败才可反驳根因。
                 status = HypothesisStatus.ABANDONED  # 没有实际测试反证时只放弃本方案。
             self._graph.update_hypothesis(hypothesis_id, status, evidence_id=latest_verification.node_id if latest_verification else None)  # 由图校验强状态必须有验证证据。
             if status in {HypothesisStatus.REFUTED, HypothesisStatus.ABANDONED}:  # 已否定根因不能继续是主假设。
@@ -343,6 +393,8 @@ class PatchFlowAgent:  # 与第三周线性基线并列的显式阶段主策略�
         await self._reproduce()  # 尽可能取得修复前公开测试信号。
         self._localize()  # 融合 Issue、静态代码和失败反馈生成候选位置。
         await self._plan()  # 创建第一个可证伪根因假设。
+        if self._config.max_candidates_per_round > 1:  # 多候选配置进入第六周独立候选路径。
+            return await self._drive_branches()  # 每轮生成多个 patch 并在独立工作区验证。
         reflections = 0  # 记录已经执行的结构化反思轮次。
         generation_ready = False  # 标记是否已由 REFLECT 合法进入补丁生成阶段。
         while True:  # 仅在有限预算和反思上限内重试单候选。

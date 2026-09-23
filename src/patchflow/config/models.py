@@ -25,6 +25,8 @@ class AgentConfig(StrictConfigModel):
 
     strategy: str = Field(default="linear_react", min_length=1)
     max_candidates_per_round: int = Field(default=1, ge=1, le=8)
+    candidate_concurrency: int = Field(default=2, ge=1, le=8)  # 限制同一任务同时验证的候选数量。
+    verification_concurrency: int = Field(default=2, ge=1, le=8)  # 为后续批量验证保留独立并发上限。
     max_reflection_rounds: int = Field(default=2, ge=0, le=10)
     stop_on_verified_candidate: bool = True
 

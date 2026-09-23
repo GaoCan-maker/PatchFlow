@@ -71,6 +71,30 @@ def test_main_strategy_reaches_verified_patch_with_explicit_phases(tmp_path: Pat
     assert len(model.requests) == 3  # 成功路径仅发生三个离线模型决策。
 
 
+def test_sixth_week_branching_selects_verified_candidate_from_independent_workspaces(tmp_path: Path) -> None:  # 验证第六周真正接入第五周主策略。
+    fixture = create_temporary_git_repository(tmp_path)  # 创建所有候选共享的干净基础仓库。
+    task = fixture.task.model_copy(update={"public_commands": (f"{sys.executable} -m pytest -q",)})  # 让主 Runtime 和候选 Runtime 使用同一解释器。
+    config = AppConfig(agent=AgentConfig(strategy="patchflow", max_candidates_per_round=2, candidate_concurrency=2), runtime=RuntimeConfig(kind="local"))  # 开启两个候选和两个验证并发槽。
+    context = initialize_run(task, config, runs_root=tmp_path / "runs")  # 创建第六周运行 artifact。
+    wrong = valid_patch().replace('Hello, {cleaned_name}', 'Oops, {cleaned_name}')  # 构造能应用但公开测试失败的候选。
+    model = FakeModel((_understanding(), _plan("输入姓名未规范化导致问题"), _reply({"patch": wrong}), _reply({"patch": valid_patch()})))  # 依次返回理解、计划、失败候选和成功候选。
+    def factory(workspace: Path, root: Path) -> LocalRuntime:  # 定义每个候选的本地 Runtime 工厂。
+        return LocalRuntime(workspace, root)  # 将 Runtime 绑定到当前独立候选目录。
+
+    agent = PatchFlowAgent(model, config=config.agent, branch_runtime_factory=factory, branch_python_executable=sys.executable)  # 装配第六周多候选主策略。
+    runtime = LocalRuntime(fixture.repository, fixture.isolation_root)  # 主状态机仍使用独立源仓库 Runtime。
+    outcome = asyncio.run(agent.run(task, context, runtime))  # 执行多候选生成、验证和选择。
+    assert outcome.status is RunStatus.SUCCEEDED  # 有一个候选通过后整体任务应成功。
+    assert outcome.stop_reason == "candidate_selected"  # 终止原因应明确来自候选选择。
+    assert outcome.patch is not None and "cleaned_name = name.strip()" in outcome.patch  # 最终补丁必须来自通过候选的真实 diff。
+    assert context.state.selected_candidate_id is not None  # 状态必须保存候选身份。
+    phases = [event.payload["phase"] for event in context.event_store.load_all() if event.event_type is EventType.PHASE_CHANGED]  # 从轨迹提取第六周阶段序列。
+    assert phases == ["initialize", "understand", "reproduce", "localize", "plan", "generate_candidates", "verify_candidates", "select_and_finalize", "completed"]  # 确认多候选路径仍遵守显式状态机。
+    report = json.loads((context.layout.run_dir / "candidates" / "branching_report.json").read_text(encoding="utf-8"))  # 读取候选比较报告。
+    assert report["selection"]["selected_candidate_id"] == context.state.selected_candidate_id  # 报告和状态必须引用同一候选。
+    assert sum(item["passed"] for item in report["candidates"]) == 1  # 失败候选不能被选择器隐藏。
+
+
 def test_failed_candidate_refutes_hypothesis_and_replans(tmp_path: Path) -> None:  # 验证反证进入上下文并改变下一步。
     wrong = valid_patch().replace('Hello, {cleaned_name}', 'Oops, {cleaned_name}')  # 制造可应用但公开测试失败的候选。
     responses = (_understanding(), _plan("前缀错误是唯一根因"), _reply({"patch": wrong}), _reflection(status="refuted", action="replan"), _plan("输入姓名未经规范化导致额外空白"), _reply({"patch": valid_patch()}))  # 先失败再提出不同根因。

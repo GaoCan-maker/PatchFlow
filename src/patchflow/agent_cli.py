@@ -29,6 +29,8 @@ def main(argv: list[str] | None = None) -> int:  # 提供可测试的单任务 C
     parser.add_argument("--base-url")  # 第三方兼容服务需要明确 HTTPS Base URL。
     parser.add_argument("--runs-root", type=Path, required=True)  # 指定独立运行 artifact 根目录。
     parser.add_argument("--max-reflections", type=int, default=2)  # 控制失败后最多允许的反思轮次。
+    parser.add_argument("--max-candidates", type=int, default=1)  # 控制每轮最多生成的独立候选数量。
+    parser.add_argument("--candidate-concurrency", type=int, default=2)  # 控制候选同时验证的数量。
     parser.add_argument("--allow-api-spend", action="store_true")  # 设置真实网络模型调用的硬门槛。
     args = parser.parse_args(argv)  # 解析全部用户输入。
     if not args.allow_api_spend:  # 没有付费许可时连客户端也不构造。
@@ -44,12 +46,15 @@ def main(argv: list[str] | None = None) -> int:  # 提供可测试的单任务 C
     if not task.public_commands:  # 无公开验证时第五周主策略无法报告成功。
         parser.error("第五周主策略要求至少一条公开测试命令")  # 避免不必要的付费试跑。
     model_config = ModelConfig(provider=args.provider, model=args.model_id, base_url=args.base_url)  # 校验模型服务地址与 ID。
-    agent_config = AgentConfig(strategy="patchflow", max_candidates_per_round=1, max_reflection_rounds=args.max_reflections)  # 固定第五周单候选边界。
+    agent_config = AgentConfig(strategy="patchflow", max_candidates_per_round=args.max_candidates, candidate_concurrency=args.candidate_concurrency, max_reflection_rounds=args.max_reflections)  # 根据命令行选择第五周单候选或第六周多候选。
     config = AppConfig(agent=agent_config, model=model_config, runtime=RuntimeConfig(kind="docker"))  # 强制 Docker 隔离配置。
     model = OpenAIChatModel(model_config)  # 仅在显式许可后读取宿主密钥并构造客户端。
     runtime = DockerRuntime(Path(task.repo_spec.location))  # 只读挂载源仓库并在容器内创建候选副本。
     context = initialize_run(task, config, runs_root=args.runs_root)  # 保存不含明文密钥的运行快照。
-    outcome = asyncio.run(PatchFlowAgent(model, config=agent_config).run(task, context, runtime))  # 执行显式阶段、证据图和反思流程。
+    def branch_factory(workspace: Path, _root: Path) -> DockerRuntime:  # 定义第六周每个候选的 Docker Runtime 工厂。
+        return DockerRuntime(workspace)  # 为当前候选创建独立容器。
+
+    outcome = asyncio.run(PatchFlowAgent(model, config=agent_config, branch_runtime_factory=branch_factory, branch_python_executable="python").run(task, context, runtime))  # 执行显式阶段、证据图、候选分支和反思流程。
     print(json.dumps({"run_id": context.state.run_id, "status": outcome.status.value, "stop_reason": outcome.stop_reason, "final_patch": context.manifest.final_patch_path, "run_dir": str(context.layout.run_dir)}, ensure_ascii=False, indent=2))  # 输出可查阅的结果路径而不打印密钥。
     return 0 if outcome.patch is not None else 1  # 只有存在已验证补丁时返回成功退出码。
 
