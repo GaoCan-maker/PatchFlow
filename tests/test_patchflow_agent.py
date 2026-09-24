@@ -14,9 +14,15 @@ from patchflow.config.models import (  # 配置主策略和可信本地测试后
     AppConfig,  # 构造正式运行快照。
     RuntimeConfig,  # 声明可信本地测试后端。
 )  # 完成配置类型导入。
-from patchflow.domain.enums import AgentPhase, EventType, RunStatus  # 断言显式阶段和终态。
+from patchflow.domain.enums import (  # 断言显式阶段、终态和 benchmark 来源。
+    AgentPhase,  # 检查状态机最终阶段。
+    EventType,  # 提取轨迹中的阶段事件。
+    RunStatus,  # 区分成功、失败和待评分补丁。
+    TaskSource,  # 构造只允许 prediction 模式的 SWE-bench 任务。
+)  # 完成测试枚举导入。
 from patchflow.domain.runtime import CommandResult  # 标注测试 Runtime 包装器的真实返回类型。
 from patchflow.domain.task import Budget  # 构造主策略资源上限测试任务。
+from patchflow.localization import IndexSettings  # 验证主策略能够接收大型仓库索引预算。
 from patchflow.model.fake import FakeModel  # 逐步提供确定性离线决策。
 from patchflow.model.protocol import ModelResponse  # 构造正式模型回复对象。
 from patchflow.runtime.local import LocalRuntime  # 只在临时隔离仓库中执行公开测试。
@@ -69,6 +75,36 @@ def test_main_strategy_reaches_verified_patch_with_explicit_phases(tmp_path: Pat
     phases = [event.payload["phase"] for event in context.event_store.load_all() if event.event_type is EventType.PHASE_CHANGED]  # 从事件流提取阶段序列。
     assert phases == ["initialize", "understand", "reproduce", "localize", "plan", "generate_candidates", "verify_candidates", "select_and_finalize", "completed"]  # 检查状态机未跳阶段。
     assert len(model.requests) == 3  # 成功路径仅发生三个离线模型决策。
+
+
+def test_main_strategy_applies_explicit_index_file_limit(tmp_path: Path) -> None:  # 验证命令行提供的索引预算不会在主策略中丢失。
+    fixture = create_temporary_git_repository(tmp_path)  # 建立包含多个 Python 文件的可信临时仓库。
+    config = AppConfig(agent=AgentConfig(strategy="patchflow"), runtime=RuntimeConfig(kind="local"))  # 使用本地隔离后端避免模型费用。
+    context = initialize_run(fixture.task, config, runs_root=tmp_path / "runs")  # 为失败结果创建可审计运行目录。
+    model = FakeModel(())  # 索引超限时不应产生任何模型请求。
+    agent = PatchFlowAgent(model, config=config.agent, index_settings=IndexSettings(max_files=1))  # 设置明显小于仓库文件数的上限。
+    runtime = LocalRuntime(fixture.repository, fixture.isolation_root)  # 在临时仓库执行真实 Git 文件枚举。
+    outcome = asyncio.run(agent.run(fixture.task, context, runtime))  # 运行至索引检查并记录最终状态。
+    assert outcome.status is RunStatus.INFRASTRUCTURE_ERROR and outcome.stop_reason == "ValueError"  # 索引超限必须作为环境配置错误停止。
+    assert not model.requests  # 未完成仓库准备时绝不调用模型。
+
+
+def test_swebench_prediction_mode_exports_patch_without_claiming_hidden_tests_passed(tmp_path: Path) -> None:  # 验证 benchmark 推理与官方 resolved 判定保持分离。
+    fixture = create_temporary_git_repository(tmp_path)  # 创建可信临时 Git 仓库作为公开基础提交。
+    task = fixture.task.model_copy(update={"source": TaskSource.SWE_BENCH, "public_commands": (), "evaluation_ref": "swebench://lite/test/demo__repo-1"})  # 模拟绝不包含隐藏测试命令的 SWE-bench TaskSpec。
+    config = AppConfig(agent=AgentConfig(strategy="patchflow"), runtime=RuntimeConfig(kind="local"))  # 使用可信本地 Runtime 验证状态语义。
+    context = initialize_run(task, config, runs_root=tmp_path / "runs")  # 创建正式运行工件目录。
+    model = FakeModel((_understanding(), _plan("greet 未规范化输入姓名导致额外空白"), _reply({"patch": valid_patch()})))  # 提供一轮可应用且语法合法的补丁。
+    agent = PatchFlowAgent(model, config=config.agent, branch_python_executable=sys.executable, benchmark_prediction_mode=True)  # 显式开启只允许 SWE-bench 的 prediction 模式。
+    runtime = LocalRuntime(fixture.repository, fixture.isolation_root)  # 将所有文件和命令限制在 pytest 临时目录。
+    outcome = asyncio.run(agent.run(task, context, runtime))  # 执行理解、定位、计划、补丁和非隐藏语法检查。
+    assert outcome.status is RunStatus.PATCH_GENERATED  # 静态检查通过不能被误报为 succeeded 或 resolved。
+    assert outcome.stop_reason == "benchmark_prediction_ready" and outcome.patch is not None  # 结果应明确等待官方 Harness 评分。
+    assert context.state.phase is AgentPhase.COMPLETED  # 正常生成 prediction 属于完成而不是策略失败。
+    assert context.layout.final_patch_path.read_text(encoding="utf-8") == outcome.patch  # 官方导出的补丁必须来自 Runtime 真实 diff。
+    graph = json.loads((context.layout.run_dir / "evidence_graph.json").read_text(encoding="utf-8"))  # 检查最终证据语义。
+    assert not any(node["kind"] == "hypothesis" and node["status"] == "confirmed" for node in graph["nodes"])  # 语法通过不能确认根因或隐藏测试行为。
+    assert any(node["kind"] == "verification_result" and node["metadata"].get("scope") == "syntax_only" for node in graph["nodes"])  # 轨迹必须明确记录验证覆盖范围。
 
 
 def test_sixth_week_branching_selects_verified_candidate_from_independent_workspaces(tmp_path: Path) -> None:  # 验证第六周真正接入第五周主策略。

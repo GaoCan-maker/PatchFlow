@@ -35,11 +35,13 @@ from patchflow.domain.enums import (  # 使用正式状态与事件枚举。
     EventActor,  # 标记轨迹事件生产者。
     EventType,  # 限定可回放事件类别。
     RunStatus,  # 标记任务最终状态。
+    TaskSource,  # 只允许 SWE-bench 任务进入无隐藏测试的预测模式。
 )  # 完成状态和事件类型导入。
 from patchflow.domain.events import AgentEvent  # 写入可回放的因果事件。
 from patchflow.domain.runtime import CommandResult, Runtime  # 仅通过隔离 Runtime 操作仓库。
 from patchflow.domain.task import TaskSpec  # 读取 Issue、公开命令和预算。
 from patchflow.localization import (  # 复用第四周基础提交索引与定位器。
+    IndexSettings,  # 为大型 SWE-bench 仓库显式配置索引上限。
     RepoIndex,  # 标注已建立的仓库索引。
     build_repo_index,  # 从干净基础提交构建索引。
     localize,  # 组合 Issue、代码与失败证据定位。
@@ -79,7 +81,7 @@ class RuntimeEnvironmentFailure(Exception):  # 区分测试环境未启动与代
 
 
 class PatchFlowAgent:  # 与第三周线性基线并列的显式阶段主策略。
-    def __init__(self, model: Model, *, config: AgentConfig | None = None, context_builder: EvidenceContextBuilder | None = None, branch_runtime_factory: RuntimeFactory | None = None, branch_python_executable: str = "python") -> None:  # 注入模型、策略上限和候选 Runtime 工厂。
+    def __init__(self, model: Model, *, config: AgentConfig | None = None, context_builder: EvidenceContextBuilder | None = None, branch_runtime_factory: RuntimeFactory | None = None, branch_python_executable: str = "python", benchmark_prediction_mode: bool = False, index_settings: IndexSettings | None = None) -> None:  # 注入模型、策略上限、候选 Runtime、预测模式和索引预算。
         self._model = model  # 保留 provider 无关模型实例。
         self._config = config or AgentConfig(strategy="patchflow")  # 默认选择第五周主策略配置。
         if self._config.max_candidates_per_round > 1 and branch_runtime_factory is None:  # 多候选需要明确的隔离 Runtime 创建方式。
@@ -87,6 +89,8 @@ class PatchFlowAgent:  # 与第三周线性基线并列的显式阶段主策略�
         self._context_builder = context_builder or EvidenceContextBuilder()  # 构造结构化分区上下文。
         self._branch_runtime_factory = branch_runtime_factory  # 保存每个候选独立使用的 Runtime 工厂。
         self._branch_python_executable = branch_python_executable  # 保存候选语法检查所用解释器。
+        self._benchmark_prediction_mode = benchmark_prediction_mode  # 只生成待官方评分补丁，不把静态检查宣称为 resolved。
+        self._index_settings = index_settings  # 让调用方为大仓库显式提高索引容量，默认仍沿用第四周配置。
 
     def _record(self, event_type: EventType, actor: EventActor, payload: dict[str, object]) -> str:  # 追加带因果链的正式事件。
         event = AgentEvent(run_id=self._context.state.run_id, task_id=self._task.task_id, event_type=event_type, actor=actor, causation_event_id=self._last_event_id, payload=payload)  # 构造 JSON 可序列化事件。
@@ -178,7 +182,7 @@ class PatchFlowAgent:  # 与第三周线性基线并列的显式阶段主策略�
     async def _initialize(self) -> None:  # 验证环境并建立基础提交索引。
         self._phase(AgentPhase.INITIALIZE)  # 进入正式状态机起点。
         await self._runtime.start(self._task)  # 由 Runtime 检查仓库、基础提交与隔离策略。
-        self._index = await build_repo_index(self._runtime, self._task)  # 只在干净基础提交创建第四周索引。
+        self._index = await build_repo_index(self._runtime, self._task, settings=self._index_settings)  # 只在干净基础提交按本次预算创建索引。
         self._context.state.status = RunStatus.RUNNING  # 标记可执行环境已经准备好。
         self._context.manifest.status = RunStatus.RUNNING  # 同步运行清单状态。
         ManifestStore(self._context.layout.manifest_path).save(self._context.manifest)  # 持久化进入运行态的事实。
@@ -311,7 +315,21 @@ class PatchFlowAgent:  # 与第三周线性基线并列的显式阶段主策略�
     async def _verify(self, candidate_id: str) -> bool:  # 对当前单候选执行全部公开测试。
         self._phase(AgentPhase.VERIFY_CANDIDATES)  # 进入候选验证阶段。
         if not self._task.public_commands:  # 没有公开测试就不能声称内部验证通过。
-            raise StrategyStop("missing_public_commands")  # 保守停止并保留候选 artifact。
+            if not self._benchmark_prediction_mode:  # 普通任务仍必须拥有可观察的行为测试。
+                raise StrategyStop("missing_public_commands")  # 保守停止并保留候选 artifact。
+            syntax_commands = tuple(shlex.join((self._branch_python_executable, "-m", "py_compile", path)) for path in sorted(self._modified_files) if path.endswith(".py"))  # 只对实际修改的 Python 文件构造无隐藏信息的语法检查。
+            if not syntax_commands:  # 非 Python 补丁没有通用且不泄漏答案的行为命令。
+                self._record(EventType.DECISION_RECORDED, EventActor.VERIFIER, {"phase": "verify_candidates", "candidate_id": candidate_id, "result": "no_public_or_python_checks"})  # 明确记录只完成补丁可应用性检查。
+                return True  # 允许输出 prediction，但后续终态不会标记为 succeeded。
+            for command in syntax_commands:  # 逐个检查修改后的 Python 文件能否被解释器解析。
+                result = await self._execute_test(command, candidate_id=candidate_id)  # 通过统一 Runtime 执行并记录真实观察。
+                verification_event = self._record(EventType.VERIFICATION_COMPLETED, EventActor.VERIFIER, {"candidate_id": candidate_id, "command": command, "passed": result.succeeded, "return_code": result.return_code, "scope": "syntax_only"})  # 标明该结果只覆盖语法而非问题修复。
+                node = self._graph.add_node(EvidenceKind.VERIFICATION, f"语法检查 {command}：{'通过' if result.succeeded else '失败'}；退出码 {result.return_code}", EvidenceOrigin.VERIFICATION, f"event:{verification_event}", metadata={"candidate_id": candidate_id, "passed": result.succeeded, "eligible_refutation": False, "scope": "syntax_only"})  # 防止语法通过被提升为根因确认。
+                self._graph.add_edge(self._current_attempt, node.node_id, EvidenceRelation.VERIFIES, f"event:{verification_event}")  # 保留语法检查与候选补丁的身份关系。
+                self._sync_graph()  # 立即持久化 benchmark 静态验证事实。
+                if not result.succeeded:  # 语法错误补丁不能提交给昂贵的官方 Harness。
+                    return False  # 进入正常反思或失败路径。
+            return True  # 仅表示 prediction 通过本地非隐藏检查。
         passed = True  # 后续任一公开命令失败都会覆盖结果。
         for command in self._task.public_commands:  # 逐个运行任务定义的公开检查。
             result = await self._execute_test(command, candidate_id=candidate_id)  # 获取真实 Runtime 观察。
@@ -327,7 +345,7 @@ class PatchFlowAgent:  # 与第三周线性基线并列的显式阶段主策略�
     async def _drive_branches(self) -> AgentOutcome:  # 执行第六周多候选生成、隔离验证和确定性选择。
         if self._branch_runtime_factory is None:  # 多候选必须有独立 Runtime 工厂。
             raise StrategyStop("missing_branch_runtime_factory")  # 不允许退化为共享工作区。
-        if not self._task.public_commands:  # 没有公开目标测试不能声称候选通过。
+        if not self._task.public_commands and not self._benchmark_prediction_mode:  # 普通任务没有公开目标测试不能声称候选通过。
             raise StrategyStop("missing_public_commands")  # 保留明确的验证不足原因。
         self._phase(AgentPhase.GENERATE_CANDIDATES)  # 进入第六周候选生成阶段。
         patches: list[str] = []  # 保存本轮模型生成的补丁文本。
@@ -340,7 +358,7 @@ class PatchFlowAgent:  # 与第三周线性基线并列的显式阶段主策略�
         branch_root = self._context.layout.run_dir / "candidate_workspaces"  # 把候选副本限制在本次运行目录内。
         branch_config = BranchingConfig(max_candidates=self._config.max_candidates_per_round, max_concurrency=self._config.candidate_concurrency)  # 使用配置限制候选资源。
         engine = CandidateBranchingEngine(config=branch_config, pyramid=VerificationPyramid(command_timeout_seconds=min(300.0, self._task.budget.max_command_seconds)))  # 装配受限验证金字塔。
-        plan = VerificationPlan.from_task(self._task, python_executable=self._branch_python_executable, allowed_files=frozenset({self._planned_file}))  # 将单文件计划转换为候选验证约束。
+        plan = VerificationPlan.from_task(self._task, python_executable=self._branch_python_executable, allowed_files=frozenset({self._planned_file}), require_target=not self._benchmark_prediction_mode)  # benchmark 只执行可应用性和语法检查，隐藏行为测试留给官方 Harness。
         self._phase(AgentPhase.VERIFY_CANDIDATES)  # 进入并发候选验证阶段。
         results, selection = await engine.run(self._task, patches, isolation_root=branch_root, runtime_factory=self._branch_runtime_factory, plan=plan, report_path=self._context.layout.run_dir / "candidates" / "branching_report.json")  # 创建独立工作区并验证全部候选。
         for index, result in enumerate(results):  # 将每个候选报告写回 Evidence Graph。
@@ -359,7 +377,9 @@ class PatchFlowAgent:  # 与第三周线性基线并列的显式阶段主策略�
             raise StrategyStop("selected_candidate_missing_diff")  # 防止只保存模型原文。
         self._phase(AgentPhase.SELECT_AND_FINALIZE)  # 进入正式最终选择阶段。
         self._context.state.selected_candidate_id = selected.candidate_id  # 保存最终候选身份。
-        return AgentOutcome(RunStatus.SUCCEEDED, "candidate_selected", selected.verified_patch)  # 返回经过隔离验证的真实补丁。
+        status = RunStatus.PATCH_GENERATED if self._benchmark_prediction_mode else RunStatus.SUCCEEDED  # 区分待官方评分 prediction 与公开测试已通过补丁。
+        reason = "benchmark_prediction_ready" if self._benchmark_prediction_mode else "candidate_selected"  # 使用不会误导 resolved 结论的停止原因。
+        return AgentOutcome(status, reason, selected.verified_patch)  # 返回经过相应公开验证层级的真实补丁。
 
     async def _reflect(self) -> ReflectionAction:  # 基于真实失败进行结构化阶段路由。
         self._phase(AgentPhase.REFLECT)  # 进入可回跳的反思阶段。
@@ -410,11 +430,13 @@ class PatchFlowAgent:  # 与第三周线性基线并列的显式阶段主策略�
                     raise StrategyStop("workspace_modified_during_verification")  # 不把测试副作用混进最终补丁。
                 hypothesis_id = self._context.state.main_hypothesis  # 读取被本次验证支持的假设。
                 verification = self._graph.latest(EvidenceKind.VERIFICATION)  # 获取最新实际通过结果。
-                if hypothesis_id is not None and verification is not None:  # 确认有可追溯的验证节点。
+                if hypothesis_id is not None and verification is not None and not self._benchmark_prediction_mode:  # 只有行为测试通过才能确认根因假设。
                     self._graph.update_hypothesis(hypothesis_id, HypothesisStatus.CONFIRMED, evidence_id=verification.node_id)  # 用实际测试支持根因假设。
                 self._context.state.selected_candidate_id = candidate_id  # 保存被选中候选 ID。
                 self._sync_graph()  # 写出最终图状态。
-                return AgentOutcome(RunStatus.SUCCEEDED, "public_tests_passed", exported)  # 仅声称内部公开测试通过。
+                status = RunStatus.PATCH_GENERATED if self._benchmark_prediction_mode else RunStatus.SUCCEEDED  # benchmark 静态检查不能等同于真实修复成功。
+                reason = "benchmark_prediction_ready" if self._benchmark_prediction_mode else "public_tests_passed"  # 保存准确且机器可读的终止语义。
+                return AgentOutcome(status, reason, exported)  # 返回待官方评分或已通过公开测试的真实补丁。
             if reflections >= self._config.max_reflection_rounds:  # 用完反思次数后停止无效尝试。
                 return AgentOutcome(RunStatus.FAILED, "reflection_rounds", None)  # 不导出未验证补丁。
             reflections += 1  # 在模型反思前占用一轮预算。
@@ -433,6 +455,8 @@ class PatchFlowAgent:  # 与第三周线性基线并列的显式阶段主策略�
                 generation_ready = True  # 告知下一轮生成器不重复执行同一阶段迁移。
 
     async def run(self, task: TaskSpec, context: RunContext, runtime: Runtime) -> AgentOutcome:  # 对外执行一次独立主策略运行。
+        if self._benchmark_prediction_mode and task.source is not TaskSource.SWE_BENCH:  # 预测模式不能成为普通任务绕过测试的后门。
+            raise ValueError("benchmark_prediction_mode 只允许 SWE-bench 任务")  # 在启动 Runtime 和模型调用前拒绝错误配置。
         if context.state.task_id != task.task_id or context.manifest.task_id != task.task_id or context.manifest.run_id != context.state.run_id:  # 验证任务与运行目录归属。
             raise ValueError("运行上下文与任务不匹配")  # 防止事件和补丁交叉写入。
         if context.state.phase is not AgentPhase.CREATED or context.manifest.status is not RunStatus.PENDING:  # 拒绝重复消费已有运行。
@@ -476,11 +500,12 @@ class PatchFlowAgent:  # 与第三周线性基线并列的显式阶段主策略�
             context.state.usage.wall_clock_seconds = time.perf_counter() - self._started_at  # 保存真实总墙钟耗时。
             context.state.status = outcome.status  # 同步当前运行状态。
             context.state.stop_reason = outcome.stop_reason  # 保存终止理由。
-            target = AgentPhase.COMPLETED if outcome.status is RunStatus.SUCCEEDED else AgentPhase.FAILED  # 选择合法终态。
+            completed_statuses = {RunStatus.SUCCEEDED, RunStatus.PATCH_GENERATED}  # 两者都正常结束，但只有前者表示公开行为验证成功。
+            target = AgentPhase.COMPLETED if outcome.status in completed_statuses else AgentPhase.FAILED  # 选择合法终态。
             if not context.state.is_terminal:  # 只有尚未进入终态时执行迁移。
                 context.state.transition_to(target)  # 使用正式状态迁移表而非直接赋值。
                 self._record(EventType.PHASE_CHANGED, EventActor.AGENT, {"phase": target.value})  # 轨迹中记录最终阶段。
-            if outcome.patch is not None:  # 只有实际通过公开测试的补丁能进入最终产物。
+            if outcome.patch is not None:  # 已验证补丁或待官方评分 prediction 都需要进入最终产物。
                 context.layout.final_patch_path.write_text(outcome.patch, encoding="utf-8")  # 保存 Runtime 导出的标准 diff。
                 context.manifest.final_patch_path = str(context.layout.final_patch_path)  # 关联清单中的最终补丁路径。
             context.manifest.status = outcome.status  # 持久化真实终态。
@@ -488,6 +513,6 @@ class PatchFlowAgent:  # 与第三周线性基线并列的显式阶段主策略�
             context.manifest.finished_at = datetime.now(UTC)  # 记录结束时间。
             ManifestStore(context.layout.manifest_path).save(context.manifest)  # 原子保存最终清单。
             self._sync_graph()  # 即使异常中断也保存最后可用的图快照。
-            event_type = EventType.RUN_COMPLETED if outcome.status is RunStatus.SUCCEEDED else EventType.RUN_FAILED  # 区分任务完成与失败。
+            event_type = EventType.RUN_COMPLETED if outcome.status in completed_statuses else EventType.RUN_FAILED  # 区分正常产出 prediction 与真实失败。
             self._record(event_type, EventActor.AGENT, {"status": outcome.status.value, "reason": outcome.stop_reason})  # 写入终止事件。
         return outcome  # 返回与最终清单和图状态一致的结果。

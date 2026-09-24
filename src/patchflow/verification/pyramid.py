@@ -30,14 +30,14 @@ class VerificationPlan:  # 保存一个候选需要经过的命令层级。
     require_target: bool = True  # 默认要求至少有一个目标验证命令。
 
     @classmethod  # 提供从统一任务生成默认计划的工厂方法。
-    def from_task(cls, task: TaskSpec, *, python_executable: str = "python", allowed_files: frozenset[str] | None = None, reproduction_commands: tuple[str, ...] = (), regression_commands: tuple[str, ...] = ()) -> VerificationPlan:  # 将公开命令放入目标测试层。
+    def from_task(cls, task: TaskSpec, *, python_executable: str = "python", allowed_files: frozenset[str] | None = None, reproduction_commands: tuple[str, ...] = (), regression_commands: tuple[str, ...] = (), require_target: bool = True) -> VerificationPlan:  # 将公开命令放入目标测试层，并允许 benchmark 推理只执行非隐藏检查。
         return cls(  # 构造不猜测额外静态检查的保守计划。
             python_executable=python_executable,  # 使用调用方明确选择的解释器。
             allowed_files=allowed_files,  # 传递候选实际可修改的文件集合。
             reproduction_commands=reproduction_commands,  # 使用调用方明确提供的最小复现命令。
             target_commands=task.public_commands,  # 把任务公开命令作为默认目标测试。
             regression_commands=regression_commands,  # 使用调用方明确提供的大范围回归命令。
-            require_target=True,  # 没有公开命令时仍要求目标验证并拒绝虚构成功。
+            require_target=require_target,  # 普通任务要求目标测试，benchmark 推理则由官方 Harness 延后判定。
         )  # 返回验证计划。
 
 

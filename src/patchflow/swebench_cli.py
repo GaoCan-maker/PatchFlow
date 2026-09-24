@@ -16,6 +16,11 @@ from patchflow.swebench.harness import (  # 导入官方 Harness 编排接口。
     parse_harness_results,  # 离线解析已有官方结果。
     run_harness,  # 在显式许可后启动官方进程。
 )  # 完成 Harness 接口导入。
+from patchflow.swebench.inference import (  # 准备仓库并收集正式运行补丁。
+    RepositoryPreparationError,  # 分类公开仓库克隆和检出失败。
+    collect_run_predictions,  # 从标准运行工件生成官方 prediction。
+    prepare_repositories,  # 为固定实例准备干净基础仓库。
+)  # 完成 benchmark 推理辅助接口导入。
 from patchflow.swebench.models import (  # 导入数据转换、隔离和 prediction 接口。
     InferenceBundle,  # 保存带数据集元信息的推理 bundle。
     SweBenchPrediction,  # 校验官方三字段预测。
@@ -123,6 +128,19 @@ def main(argv: list[str] | None = None) -> int:  # 提供可由测试直接注�
     convert.add_argument("--tasks-output", type=Path, required=True)  # 输出现有 PatchFlow CLI 可读取的任务数组。
     convert.add_argument("--bundle-output", type=Path)  # 可选输出带数据集元信息的安全 bundle。
     convert.add_argument("--private-evaluation-output", type=Path)  # 可选显式输出评测私有答案文件。
+    prepare = commands.add_parser("prepare", help="克隆固定 SWE-bench 子集并生成本地 TaskSpec")  # 定义显式联网仓库准备命令。
+    prepare.add_argument("input", type=Path)  # 接收本地保存的官方 JSON 或 JSONL 数据集记录。
+    prepare.add_argument("--instance-id", action="append", required=True)  # 要求逐个固定实验实例，禁止隐式克隆整个数据集。
+    prepare.add_argument("--repositories-root", type=Path, required=True)  # 指定每个实例独立仓库的父目录。
+    prepare.add_argument("--tasks-output", type=Path, required=True)  # 写出 Agent CLI 可直接读取的本地任务数组。
+    prepare.add_argument("--dataset-name", default="princeton-nlp/SWE-bench_Lite")  # 记录实验使用的官方数据集名称。
+    prepare.add_argument("--split", default="test")  # 记录实验数据分片。
+    prepare.add_argument("--git-timeout-seconds", type=float, default=900.0)  # 限制每条克隆或检出命令的墙钟时间。
+    collect = commands.add_parser("collect-runs", help="从独立 runs root 收集官方 prediction JSONL")  # 定义不调用模型的预测汇总命令。
+    collect.add_argument("runs_root", type=Path)  # 接收一个实验配置独占的 PatchFlow 运行根目录。
+    collect.add_argument("output", type=Path)  # 指定官方三字段 JSONL 输出路径。
+    collect.add_argument("--instance-id", action="append", required=True)  # 固定并保留本次实验的实例顺序和分母。
+    collect.add_argument("--model-name-or-path", required=True)  # 保存方法、模型和配置的稳定实验标识。
     export = commands.add_parser("export", help="严格校验并导出官方 prediction JSONL")  # 定义预测导出命令。
     export.add_argument("input", type=Path)  # 接收 JSON 数组或 JSONL 预测对象。
     export.add_argument("output", type=Path)  # 指定标准 JSONL 输出路径。
@@ -165,6 +183,18 @@ def main(argv: list[str] | None = None) -> int:  # 提供可由测试直接注�
                 write_private_evaluation_records(private_records, arguments.private_evaluation_output)  # 原子写出私有文件。
             print(f"已转换 {len(tasks)} 个 SWE-bench 任务；未调用模型或官方 Harness。")  # 告知操作结果和副作用边界。
             return 0  # 返回成功退出码。
+        if arguments.command == "prepare":  # 执行显式联网的固定子集仓库准备。
+            raw_records = _load_json_records(arguments.input)  # 加载用户已经下载到本地的数据集记录。
+            records = tuple(SweBenchRecord.model_validate(item) for item in raw_records)  # 严格解析公开与隔离字段边界。
+            tasks = prepare_repositories(records, instance_ids=tuple(arguments.instance_id), output_root=arguments.repositories_root, dataset_name=arguments.dataset_name, split=arguments.split, timeout_seconds=arguments.git_timeout_seconds)  # 克隆并检出每个实例的精确基础提交。
+            write_task_specs(tasks, arguments.tasks_output)  # 只写出不含 gold 和隐藏测试的安全任务数组。
+            print(f"已准备 {len(tasks)} 个干净实例仓库并写出任务：{arguments.tasks_output}")  # 告知真实网络和文件副作用。
+            return 0  # 仓库与任务全部成功后返回零。
+        if arguments.command == "collect-runs":  # 从已经完成的 Agent 运行生成官方预测文件。
+            predictions = collect_run_predictions(arguments.runs_root, instance_ids=tuple(arguments.instance_id), model_name_or_path=arguments.model_name_or_path)  # 严格检查终态、任务来源、补丁和固定分母。
+            write_predictions(predictions, arguments.output)  # 原子写出官方三字段 JSONL。
+            print(f"已从运行工件收集 {len(predictions)} 条 prediction：{arguments.output}")  # 告知实际输出数量和路径。
+            return 0  # 完整收集后返回成功。
         if arguments.command == "export":  # 严格生成官方三字段 JSONL。
             raw_predictions = _load_json_records(arguments.input)  # 加载候选预测数组或 JSONL。
             predictions = []  # 初始化规范 prediction 列表。
@@ -194,7 +224,7 @@ def main(argv: list[str] | None = None) -> int:  # 提供可由测试直接注�
         _write_json(arguments.report_output, report.model_dump(mode="json"))  # 保存规范逐实例报告。
         print(report.model_dump_json(indent=2))  # 在终端展示聚合计数。
         return 0 if report.missing == 0 else 1  # 缺失实例时返回非零提醒调用方。
-    except (OSError, ValueError, PermissionError) as error:  # 捕获用户输入、文件和显式权限错误。
+    except (OSError, ValueError, PermissionError, RepositoryPreparationError) as error:  # 捕获用户输入、文件、仓库准备和显式权限错误。
         parser.error(str(error))  # 使用 argparse 统一打印错误并返回退出码二。
     return 2  # 为静态类型分析保留不可达兜底返回。
 

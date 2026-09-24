@@ -161,3 +161,7 @@ python -m patchflow.cli run-batch /tmp/patchflow-smoke/tasks.json --provider ope
 ## 第七周 SWE-bench Adapter
 
 已新增 SWE-bench 原始记录到安全 `TaskSpec` 的转换、官方三字段 prediction JSONL 导出、`swebench.harness.run_evaluation` 参数数组调用、进程组超时、模型密钥移除和多版本结果解析。推理任务写盘前会递归拒绝 gold patch、测试补丁、`FAIL_TO_PASS` 与 `PASS_TO_PASS`；官方报告中的 unresolved、评测错误、空补丁和结果缺失分别统计。离线测试不安装官方包、不下载数据集也不启动 Docker；真实 gold 与五题 Agent 预测验收需要独立官方环境和显式 `--allow-harness-run`。安装、命令、阅读顺序和当前限制见 `docs/week7_swebench.md`。
+
+## 阶段 7.5 实验接线
+
+阶段 7.5 增加固定子集仓库准备、SWE-bench 官方实例镜像推理、严格 JSON 模型探针、`patch_generated` benchmark 终态、运行工件到 prediction 的自动收集，以及 `patchflow`/`one_shot` 两种必要实验策略。SWE-bench 推理不读取隐藏测试，只有官方 Harness 可以给出 resolved 结论；`deepseek-v3.2` 等模型 ID 通过 CLI 的 `--model-id` 传入，不写入源码或密钥变量。完整操作顺序和精简实验矩阵见 `docs/week7_5_experiment_readiness.md`。

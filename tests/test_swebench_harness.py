@@ -43,7 +43,7 @@ def test_build_harness_command_uses_official_module_and_explicit_instance_ids(tm
 
 
 def test_parse_harness_results_supports_instance_reports_and_summary_lists(tmp_path: Path) -> None:  # 验证兼容常见官方报告结构。
-    results_root = tmp_path / "logs" / "evaluation" / "week7-unit"  # 模拟官方 run 目录。
+    results_root = tmp_path / "logs" / "run_evaluation" / "week7-unit"  # 模拟 SWE-bench 5.0.2 官方 run 目录。
     first = results_root / "model" / "demo__repo-1" / "report.json"  # 模拟逐实例 report.json。
     first.parent.mkdir(parents=True)  # 创建嵌套官方目录。
     first.write_text(json.dumps({"demo__repo-1": {"patch_successfully_applied": True, "resolved": True}}), encoding="utf-8")  # 写入官方 resolved 结构。

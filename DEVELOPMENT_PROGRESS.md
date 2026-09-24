@@ -443,3 +443,79 @@ Step 2A 当时的自动验证结果（后续全量结果见 Step 2C）：
 1. 用户确认磁盘和联网安装后，按 `docs/week7_swebench.md` 创建独立官方环境并完成一题 gold 验证。
 2. 再从成本可控的五题固定子集开始生成 Agent prediction，不直接运行完整 Lite 或 Verified 集。
 3. 真实五题链路通过后进入第八周任务集与正式实验，不把当前离线测试当作模型能力结果。
+
+## 13. 阶段 7.5：真实模型与精简实验接线（2026-09-24）
+
+### 已确认的外部环境
+
+- [x] 用户已在独立 `patchflow-swebench` 环境安装 SWE-bench 5.0.2。
+- [x] 官方 gold 单题 `sympy__sympy-20590` 已通过：`1 resolved / 1 submitted`，运行 ID 为 `patchflow-week7-gold-001`，耗时约 241 秒。
+- [x] 实测官方结果目录为 `logs/run_evaluation/<run_id>/...`，根汇总为 `<model>.<run_id>.json`；阶段 7 的旧目录假设已修正。
+- [x] 本地保留的官方 SymPy 镜像为 `swebench/sweb.eval.x86_64.sympy_1776_sympy-20590:latest`。
+- [x] 官方镜像内任务解释器为 `/opt/miniconda3/envs/testbed/bin/python`；默认短命令 `python` 属于镜像 base 环境，因此候选语法检查已显式改用 testbed 解释器。
+
+### 本次完成
+
+- [x] 新增 `src/patchflow/swebench/inference.py`：实现 SWE-bench 5 官方远程镜像名推导、固定实例公开仓库克隆、精确 `base_commit` 检出、清洁性检查和安全 TaskSpec 生成。
+- [x] 仓库准备不覆盖已有目录；失败时只清理由本次创建且再次确认位于显式输出根内的不完整目录。
+- [x] 新增 `patchflow-swebench prepare`：只为重复提供的 `--instance-id` 准备仓库，不允许无边界克隆整个数据集。
+- [x] 新增显式 `benchmark_prediction_mode`：普通任务仍要求公开行为测试；只有 SWE-bench 任务可以在不知道隐藏测试时完成 prediction。
+- [x] benchmark 单候选执行补丁可应用性、修改范围和修改后 Python 语法检查；多候选验证金字塔可把 `require_target` 设为 false，但不会运行或读取隐藏测试。
+- [x] benchmark 正常产出状态为 `patch_generated`，停止原因为 `benchmark_prediction_ready`；状态机进入 completed 并保存 `final.patch`，但不确认根因、不声称 `succeeded` 或 resolved。
+- [x] Agent CLI 自动为 SWE-bench 实例选择官方镜像，允许 `--docker-image` 显式覆盖，并记录 `swe_bench` Runtime 类型和资源参数。
+- [x] Agent CLI 新增 `--strategy patchflow|one_shot`，让唯一必要基线与主方法复用相同模型、任务、基础提交和官方实例镜像。
+- [x] 新增 `src/patchflow/model_probe_cli.py`：默认零费用，只有显式 `--allow-api-spend` 才发送一次 64 token 上限的严格 JSON 探针。
+- [x] 新增 `patchflow-swebench collect-runs`：严格检查固定分母、唯一运行、SWE-bench 任务来源、正常补丁终态和非空 `final.patch`，再写官方三字段 prediction JSONL。
+- [x] Harness 运行后结果定位已修正为 SWE-bench 5.0.2 的 `logs/run_evaluation/<run_id>`。
+- [x] 新增 `docs/week7_5_experiment_readiness.md`：记录模型配置、数据导出、仓库和镜像准备、单题联调、主方法、one-shot、prediction 收集与官方评分的完整顺序。
+
+### 精简后的求职项目实验
+
+1. E0 接线验收：保留已经通过的一题 gold；运行一次 `deepseek-v4-flash` 严格 JSON 探针；生成和官方评分一条 Agent prediction。E0 不作为模型能力结果。
+2. E1 主结果：预先固定 10 个 SWE-bench Lite 实例，运行 PatchFlow + `deepseek-v4-flash`，报告 resolved、patch generation、基础设施错误、模型调用、token 和墙钟时间。
+3. E2 必要基线：相同十题、模型、镜像和 Harness 运行 one-shot，只比较一次直接补丁与完整定位/计划/候选流程。
+4. E3 案例分析：从已有结果选择一个 resolved、一个 unresolved 和一个工程边界案例，不新增模型调用。
+5. 不再做 reflection、planning、memory、RepoMap 等论文式全套消融，不跑完整 Lite/Verified，也不做多模型大矩阵。
+
+### 验收结果
+
+- 阶段 7.5 定向测试：`24 passed in 16.01s`。
+- 完整非 Docker 回归：`106 passed, 11 skipped in 33.17s`。
+- 主策略、候选分支和基础 DockerRuntime 定向真实容器回归：`5 passed in 21.19s`。
+- 官方 SymPy 镜像按 PatchFlow 的非 root、只读根文件系统、禁网、移除 capabilities 参数启动 testbed Python：`Python 3.9.20`，验证通过。
+- 阶段 7.5 修改文件 Ruff：`All checks passed!`。
+- `git diff --check`：通过。
+- CLI 帮助烟测确认 `--strategy`、`--model-id`、`--benchmark-prediction-mode`、`prepare` 和 `collect-runs` 均已注册。
+- 没有读取用户 API key，没有调用 AGICTO，没有产生模型费用；真实模型能力结果仍为零。
+- 用户已有 gold 报告和 `logs/run_evaluation` 工件保持未跟踪且未被修改或删除。
+
+### 下一步
+
+1. 用户已在自己的 WSL 终端运行 `python -m patchflow.model_probe_cli --provider openai_compatible --model-id deepseek-v4-flash --base-url https://api.agicto.cn/v1 --allow-api-spend`，返回 `compatible: true`、输入 75 token、输出 47 token。
+2. 探针通过后，只用 `sympy__sympy-20590` 做一条 PatchFlow prediction 和官方评分，检查 `patch_generated -> prediction JSONL -> resolved/unresolved` 全链路。
+3. 单题通过后再一次性固定十题，不根据结果换题；先跑主方法，再跑 one-shot。
+4. 所有真实结果保存模型 ID、方法名、代码 commit、实例列表、运行清单、token、墙钟、官方报告和基础设施错误分类。
+
+## 14. 阶段 7.5 实验启动前适配（2026-09-24）
+
+### 本次完成
+
+- [x] 用户确认 `deepseek-v4-flash` 经 AGICTO 兼容接口探针成功；后续 E0/E1/E2 使用同一模型 ID。
+- [x] 实测官方 `sympy__sympy-20590` 镜像中已跟踪 Python 文件 1449 个，Git 零字节分隔路径列表约 51 KB；旧默认索引上限 400、Docker 输出上限 20 KB 会在付费调用前终止。
+- [x] Agent CLI 新增 `--index-max-files`、`--docker-output-chars`，SWE-bench 默认分别为 2000、100000；主策略接收显式索引设置，one-shot 复用相同 Docker 输出上限。
+- [x] 增加离线回归测试，验证主策略遵守显式索引文件数上限且提前失败时不会产生模型请求。
+- [x] 单题实验文档同步为已经探针验证的 `deepseek-v4-flash`；模型 ID 不写入源码或密钥变量。
+
+### 验收结果
+
+- 本次主策略和 CLI 定向离线测试：`13 passed in 7.71s`。
+- 全量离线回归：`107 passed, 11 skipped in 15.67s`；Docker 和官方 Harness 集成测试仍须显式开启。
+- 改动文件 Ruff：`All checks passed!`；`git diff --check` 通过。
+- `prepare`、`collect-runs`、Agent CLI 的实际 `--help` 参数已核对。
+- 本次未读取 API key、未调用付费模型，也未运行正式 SWE-bench prediction。
+
+### 下一步
+
+1. 在 `patchflow-swebench` 环境导出 `sympy__sympy-20590` 原始记录，在 `patchflow` 环境准备 base commit 和安全 TaskSpec。
+2. 用同一题先跑成本可控的单候选 PatchFlow prediction；若生成失败，保留 manifest 并诊断，不能在正式十题结果中静默更换实例。
+3. prediction 成功后用官方 Harness 单题评分，再一次性冻结十题集合和实验参数，执行主方法与 one-shot 基线。

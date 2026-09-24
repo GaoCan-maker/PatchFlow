@@ -59,7 +59,7 @@ class SweBenchHarnessConfig(BaseModel):  # 保存一次可复现官方评测的�
     dataset_name: str = Field(min_length=1)  # 例如 princeton-nlp/SWE-bench_Lite。
     split: str = Field(default="test", min_length=1)  # 指定官方数据集分片。
     run_id: str = Field(min_length=1, max_length=160, pattern=r"^[A-Za-z0-9._-]+$")  # 关联官方日志目录。
-    workdir: Path  # 指定官方 Harness 写 logs/evaluation 的工作目录。
+    workdir: Path  # 指定官方 Harness 写 logs/run_evaluation 的工作目录。
     instance_ids: tuple[str, ...]  # 固定本次评测分母和顺序。
     python_executable: str = Field(default=sys.executable, min_length=1)  # 支持在独立 Conda 环境运行 swebench。
     max_workers: int = Field(default=1, ge=1, le=64)  # 限制同时启动的 Docker 实例数量。
@@ -345,7 +345,7 @@ async def run_harness(  # 在显式授权后调用官方 SWE-bench Evaluation Ha
     stdout, stdout_truncated = stdout_accumulator.finish()  # 生成有界 stdout 和截断标志。
     stderr, stderr_truncated = stderr_accumulator.finish()  # 生成有界 stderr 和截断标志。
     duration = time.monotonic() - started_at  # 计算完整真实耗时。
-    results_root = config.workdir / "logs" / "evaluation" / config.run_id  # 按官方默认布局定位本次结果目录。
+    results_root = config.workdir / "logs" / "run_evaluation" / config.run_id  # 按实测 SWE-bench 5.0.2 默认布局定位本次结果目录。
     report: SweBenchHarnessReport | None = None  # 初始化可选解析报告。
     if results_root.exists():  # 即使进程非零也保留已经完成实例的官方结果。
         try:  # 结果缺失或格式异常由进程状态明确表达。
