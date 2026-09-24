@@ -390,6 +390,56 @@ Step 2A 当时的自动验证结果（后续全量结果见 Step 2C）：
 
 ### 下一步
 
-1. 将第五周 `PatchFlowAgent` 的多次结构化 `PatchProposal` 生成接入 `CandidateBranchingEngine`。
-2. 为 DockerRuntime 增加候选级并发集成测试，并依据宿主资源设置候选、容器和测试并发上限。
-3. 进入第七周 SWE-bench Adapter，分离 inference harness 与官方 evaluation harness。
+1. [已完成] 将第五周 `PatchFlowAgent` 的多次结构化 `PatchProposal` 生成接入 `CandidateBranchingEngine`。
+2. [已完成] 为 DockerRuntime 增加候选级并发集成测试，并依据宿主资源设置候选、容器和测试并发上限。
+3. [已完成代码交付] 进入第七周 SWE-bench Adapter，分离 inference harness 与官方 evaluation harness；真实官方验收状态见下一节。
+
+## 12. 第七周：SWE-bench Adapter（2026-09-23）
+
+### 当前状态
+
+代码交付与离线验收已完成；官方 gold patch 环境验证和至少五个 Agent prediction 的真实端到端评测尚未执行。未完成项是外部评测环境与真实实验，不应被误报为已有 SWE-bench 成绩。
+
+### 本次完成
+
+- [x] 新增 `src/patchflow/swebench/models.py`：严格解析 SWE-bench 原始记录，将公开字段转换为 `TaskSpec`，将 gold patch、测试补丁、`FAIL_TO_PASS` 和 `PASS_TO_PASS` 保存在独立评测记录中。
+- [x] 推理任务写盘前执行递归禁用字段检查；发现私有字段时直接失败，不采用可能掩盖上游泄漏的静默删除。
+- [x] 新增官方三字段 `SweBenchPrediction` 模型和原子 JSONL 导出；拒绝额外字段、空补丁、NUL、重复实例和空预测集合。
+- [x] 新增 `src/patchflow/swebench/harness.py`：以无 Shell 参数数组调用官方 `swebench.harness.run_evaluation`，固定数据集、分片、run ID、实例集合、并发与超时。
+- [x] Harness 默认禁止执行，只有 `allow_execution=True` 或 CLI 的 `--allow-harness-run` 才能启动；评测子进程会移除常见模型 API 密钥。
+- [x] Harness stdout/stderr 使用有界流式收集；总超时在 Linux/WSL 终止独立进程组，保留真实耗时、退出码和截断标记。
+- [x] 结果解析兼容逐实例 `report.json` 和常见汇总 ID 列表；将 `resolved`、`unresolved`、`error`、`empty_patch` 与 `missing` 分开，矛盾状态和混入其他实例会显式失败。
+- [x] 新增 `patchflow-swebench` CLI：支持 `convert`、`export`、`harness-command`、`run-harness` 和 `parse-results`；真实评测前可只预览官方命令。
+- [x] 新增默认跳过的官方 gold 集成测试，只有设置 `PATCHFLOW_RUN_SWEBENCH_TESTS=1` 和实例环境变量后才消耗 Docker、数据集和镜像资源。
+- [x] 新增 `docs/week7_swebench.md` 与 ADR 0011，记录两阶段隔离、环境拆分、完整操作命令、结果分类、阅读顺序和限制。
+
+### 验收结果
+
+- 官方数据集名称复核修正后的第七周离线适配器、报告解析与 CLI 测试：`12 passed in 1.26s`。
+- 完整非 Docker 回归：`100 passed, 11 skipped in 17.70s`；新增的一个 skip 是需要显式环境的官方 SWE-bench gold 集成测试。
+- 第七周新增 Python 文件 Ruff：`All checks passed!`。
+- `git diff --check`：通过。
+- 当前 WSL Docker daemon 可用，Server 版本 `28.0.1`；当前 `patchflow` Conda 环境检测结果为 `swebench_installed=False`。
+- 本周没有读取或调用 AGICTO/OpenAI 密钥，没有产生模型 API 费用，也没有下载 SWE-bench 数据集或官方镜像。
+
+### 尚未完成的真实第七周验收
+
+1. 在独立 `patchflow-swebench` Conda 环境安装并锁定官方 `swebench` 版本。
+2. 选择一个小型实例，以 `predictions_path=gold` 和 `max_workers=1` 验证数据集、镜像、Docker 与官方报告链路。
+3. 使用已经停止的 PatchFlow Agent 运行生成至少五条非空 prediction；这一步若调用真实模型，需要用户在宿主 WSL 自行配置 API key 并确认费用。
+4. 将五条 prediction 交给官方 Harness，保存官方日志、PatchFlow 规范报告、包版本、数据集分片、实例列表、方法标识和代码 commit。
+5. gold 或 prediction 评测中的进程失败、结果缺失和官方实例错误必须作为基础设施/评测失败记录，不能并入 Agent unresolved。
+
+### 后续阶段
+
+第七周结束不代表所有编码任务结束。核心 Agent、候选验证和官方评测接口至此形成闭环，但投递实习所需的 V1 仍包括：
+
+- 第八周：构造 MicroSWE-30、固定 SWE-bench 子集、实验矩阵、结果重聚合与失败分类，需要继续编写数据集工具和实验自动化代码。
+- 第九周：轨迹浏览器或静态报告、成功率/成本图表、案例展示和交互 CLI，需要继续编写可观测性与展示代码。
+- 第十周：干净环境安装检查、发布脚本、文档和演示材料；编码量较少，但仍会修复复现问题和打磨工程入口。
+
+### 下一步
+
+1. 用户确认磁盘和联网安装后，按 `docs/week7_swebench.md` 创建独立官方环境并完成一题 gold 验证。
+2. 再从成本可控的五题固定子集开始生成 Agent prediction，不直接运行完整 Lite 或 Verified 集。
+3. 真实五题链路通过后进入第八周任务集与正式实验，不把当前离线测试当作模型能力结果。

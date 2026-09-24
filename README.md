@@ -2,7 +2,7 @@
 
 PatchFlow 是一个验证驱动的仓库级 Code Agent。系统计划接收代码仓库、基础提交和 Issue 描述，在隔离环境中完成问题理解、故障复现、代码定位、候选补丁生成、测试验证和最终补丁输出。
 
-当前仓库已经完成领域骨架、LocalRuntime 与 DockerRuntime 工具闭环、三个第三周基线、有限上下文构建、两任务 MicroSWE 开发烟测与统一批量报告，以及可选的 OpenAI Chat Completions 模型适配器。尚未完成真实 API 联调、正式大规模 MicroSWE/SWE-bench 评测和完整 PatchFlow 策略。
+当前仓库已经完成领域骨架、LocalRuntime 与 DockerRuntime 工具闭环、三个第三周基线、Hybrid Localization、显式状态机、Evidence Graph、候选分支、验证金字塔、SWE-bench 轻量适配层，以及可选的 OpenAI Chat Completions 模型适配器。尚未完成真实 API 能力实验、官方 SWE-bench gold/五题端到端验收和正式大规模统计。
 
 ## 当前能力
 
@@ -157,3 +157,7 @@ python -m patchflow.cli run-batch /tmp/patchflow-smoke/tasks.json --provider ope
 ## 第六周候选分支
 
 已新增并接入候选分支与验证金字塔模块：候选从同一 `base_commit` 创建独立 Git 副本，按规范化补丁摘要去重，在受限并发下运行 V0 到 V5 验证层级，并使用硬约束优先的确定性规则选择候选。`max_candidates_per_round=1` 保留第五周单候选路径，设置为 2 到 4 时主策略会生成多个结构化补丁并验证真实 diff；第六周模块的运行方式和阅读顺序见 `docs/week6_candidate_branching.md`。
+
+## 第七周 SWE-bench Adapter
+
+已新增 SWE-bench 原始记录到安全 `TaskSpec` 的转换、官方三字段 prediction JSONL 导出、`swebench.harness.run_evaluation` 参数数组调用、进程组超时、模型密钥移除和多版本结果解析。推理任务写盘前会递归拒绝 gold patch、测试补丁、`FAIL_TO_PASS` 与 `PASS_TO_PASS`；官方报告中的 unresolved、评测错误、空补丁和结果缺失分别统计。离线测试不安装官方包、不下载数据集也不启动 Docker；真实 gold 与五题 Agent 预测验收需要独立官方环境和显式 `--allow-harness-run`。安装、命令、阅读顺序和当前限制见 `docs/week7_swebench.md`。
